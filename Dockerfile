@@ -1,15 +1,24 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+# Set up a new user named "user" with user ID 1000
+RUN useradd -m -u 1000 user
+# Switch to the "user" user
+USER user
+
+# Set home to the user's home directory
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
+
+WORKDIR $HOME/app
 
 # Install dependencies first (layer cache-friendly)
-COPY requirements.txt .
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY models/  models/
-COPY server/  server/
-COPY client/  client/
+COPY --chown=user models/  models/
+COPY --chown=user server/  server/
+COPY --chown=user client/  client/
 
 EXPOSE 8000
 

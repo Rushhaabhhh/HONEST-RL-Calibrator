@@ -1,8 +1,17 @@
-# HONEST-Env: Honesty-Optimised and Normalized Environment for Self-Triage
+---
+title: HONEST Env
+emoji: 🎯
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+---
 
-HONEST-Env is an OpenEnv-compliant reinforcement learning and evaluation environment designed to test and improve the **honesty and confidence calibration** of AI agents (LLMs).
+# HONEST-RL-Calibrator
 
-Instead of just checking if an agent gets the answer right, HONEST-Env forces the agent to report its confidence alongside its answer, or explicitly abstain from answering. It then scores the agent using a proper scoring rule (Brier Score) combined with adaptive curriculum difficulty.
+HONEST, short for Honesty-Optimised and Normalized Environment for Self-Triage, is an OpenEnv-compliant reinforcement learning and evaluation environment designed to test and improve the **honesty and confidence calibration** of AI agents (LLMs).
+
+Instead of just checking if an agent gets the answer right, HONEST-RL-Calibrator forces the agent to report its confidence alongside its answer, or explicitly abstain from answering. It then scores the agent using a proper scoring rule (Brier Score) combined with adaptive curriculum difficulty.
 
 ## How It Works
 
@@ -31,7 +40,7 @@ Controlled by `server/difficulty.py`, the environment manages a sliding window o
 
 ### 5. OpenEnv Server & Client Integration
 - **Server (`server/app.py`, `server/environment.py`)**: The `HonestEnvironment` scales to parallel instances, managing randomized episodes of 5 steps each. It is served using FastAPI, making it accessible via HTTP/WebSockets.
-- **Client (`client/client.py`)**: An asynchronous `EnvClient` wrapper (`HonestEnv`) which enables remote test runners and evaluation pipelines to interface seamlessly with the HONEST backend using standard OpenEnv APIs.
+- **Client (`client/client.py`)**: An asynchronous `EnvClient` wrapper (`HonestEnv`) which enables remote test runners and evaluation pipelines to interface seamlessly with the backend using standard OpenEnv APIs.
 
 ## Running
 
@@ -46,14 +55,14 @@ venv/bin/pip install -r requirements.txt
 ./run_server.sh
 ```
 
-Or using Docker:
+Or using Docker (ready for Hugging Face Spaces):
 
 ```bash
 # Build the Docker image
-docker build -t honest-env:latest .
+docker build -t honest-rl-calibrator:latest .
 
 # Run the container locally mapped to port 8000
-docker run -p 8000:8000 -d --name honest-test honest-env:latest
+docker run -p 8000:8000 -d --name honest-test honest-rl-calibrator:latest
 ```
 
 ## Testing

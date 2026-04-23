@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Environments
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local Dev
+.env
+.vscode/
+.idea/
+
+# Tests
+tests/
+
+# Jupyter
+.ipynb_checkpoints
