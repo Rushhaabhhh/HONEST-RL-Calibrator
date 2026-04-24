@@ -28,7 +28,7 @@ from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  #
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 DOMAINS = ["math", "code", "logic"]
 DIFFICULTIES = [1, 2, 3, 4, 5]
 DEFAULT_SAMPLES = 20
@@ -307,14 +307,19 @@ def main():
                         help="Print per-sample status")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip model loading; generate dummy responses for testing")
+    parser.add_argument("--model", type=str, default=MODEL_ID,
+                        help=f"Model ID or local path to evaluate (default: {MODEL_ID})")
     args = parser.parse_args()
+
+    # Allow CLI override of model — used to eval post-RL merged model
+    eval_model_id = args.model
 
     if args.dry_run:
         print("DRY-RUN mode: using stub response fn (correct format, fixed answer).\n")
         model, tokenizer = None, None
         response_fn = lambda m, t, q, **kw: "<answer>42</answer><confidence>0.7</confidence>"  # noqa: E731
     else:
-        model, tokenizer = load_model(MODEL_ID, args.device)
+        model, tokenizer = load_model(eval_model_id, args.device)
         response_fn = None  # use real generate_response
 
     conditions = {}
@@ -361,7 +366,7 @@ def main():
     }
 
     output = {
-        "model": MODEL_ID,
+        "model": eval_model_id,
         "n_samples_per_condition": args.samples,
         "conditions": conditions,
         "overall": overall,
