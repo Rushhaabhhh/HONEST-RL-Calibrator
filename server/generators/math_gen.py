@@ -40,27 +40,26 @@ def _apply(op: str, a: int, b: int) -> int:
 def _level_1(rng) -> Tuple[str, str]:
     a = rng.randint(1, 9)
     b = rng.randint(1, 9)
-    op = rng.choice(["+", "-"])
-    return f"{a} {op} {b}", _normalize(_apply(op, a, b))
+    # Only single-digit addition for the absolute easiest level
+    return f"{a} + {b}", _normalize(_apply("+", a, b))
 
 
 def _level_2(rng) -> Tuple[str, str]:
-    op = rng.choice(["+", "-", "*"])
-    a = rng.randint(10, 99)
-    b = rng.randint(10, 99)
+    op = rng.choice(["+", "-"])
+    # Small numbers, no multiplication
+    a = rng.randint(10, 30)
+    b = rng.randint(1, 15)
     return f"{a} {op} {b}", _normalize(_apply(op, a, b))
 
 
 def _level_3(rng) -> Tuple[str, str]:
-    ops = ["+", "-", "*"]
-    op1 = rng.choice(ops)
-    op2 = rng.choice(ops)
-    a = rng.randint(10, 999)
-    b = rng.randint(10, 999)
-    c = rng.randint(10, 999)
-    inner = _apply(op1, a, b)
-    answer = _apply(op2, inner, c)
-    return f"({a} {op1} {b}) {op2} {c}", _normalize(answer)
+    # Old Level 2: Double digits with multiplication
+    op = rng.choice(["+", "-", "*"])
+    a = rng.randint(10, 50)
+    b = rng.randint(10, 50)
+    if op == "*":
+        b = rng.randint(2, 12)  # Make multiplication easier
+    return f"{a} {op} {b}", _normalize(_apply(op, a, b))
 
 
 def _level_4(rng) -> Tuple[str, str]:

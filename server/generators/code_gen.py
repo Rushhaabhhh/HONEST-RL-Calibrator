@@ -28,11 +28,9 @@ def _run_and_format(code: str, val: int) -> Tuple[str, str]:
     return q, ans
 
 def _level_1(rng) -> Tuple[str, str]:
-    val = rng.randint(1, 20)
-    op = rng.choice(["+", "-", "*"])
-    c = rng.randint(1, 20)
-    d = rng.randint(1, 20)
-    code = f"def f(x):\n    return (x {op} {c}) + {d}"
+    val = rng.randint(1, 10)
+    c = rng.randint(1, 10)
+    code = f"def f(x):\n    return x + {c}"
     return _run_and_format(code, val)
 
 def _level_2(rng) -> Tuple[str, str]:

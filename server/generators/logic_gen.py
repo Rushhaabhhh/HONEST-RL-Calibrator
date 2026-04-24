@@ -26,32 +26,18 @@ def generate(difficulty: int, seed: Optional[int] = None) -> Tuple[str, str]:
     raise RuntimeError("Failed to generate a puzzle with exactly 1 unique solution.")
 
 def _level_1(rng) -> Optional[Tuple[str, str]]:
-    names = rng.sample(["A", "B", "C"], 3)
+    names = rng.sample(["A", "B"], 2)
     p = Problem()
-    p.addVariables(names, [1, 2, 3])
+    p.addVariables(names, [1, 2])
     p.addConstraint(AllDifferentConstraint())
     
-    rules = []
-    # We enforce a > b and b > c
-    n1, n2, n3 = names
+    n1, n2 = names
     p.addConstraint(lambda a, b: a > b, (n1, n2))
-    rules.append(f"{n1} is strictly greater than {n2}.")
     
-    if rng.choice([True, False]):
-        p.addConstraint(lambda b, c: b > c, (n2, n3))
-        rules.append(f"{n2} is strictly greater than {n3}.")
-    else:
-        p.addConstraint(lambda c, b: c < b, (n3, n2))
-        rules.append(f"{n3} is strictly less than {n2}.")
-        
     sols = p.getSolutions()
     if len(sols) == 1:
-        sol = sols[0]
-        largest = max(sol.keys(), key=lambda k: sol[k])
-        # Just shuffle the rules before printing
-        rng.shuffle(rules)
-        q = f"There are 3 entities: " + ", ".join(names) + ".\n" + "\n".join(rules) + "\nWho is the largest?"
-        return q, largest
+        q = f"There are 2 entities: {n1} and {n2}.\n{n1} is strictly greater than {n2}.\nWho is the largest?"
+        return q, n1
     return None
 
 def _level_2(rng) -> Optional[Tuple[str, str]]:
