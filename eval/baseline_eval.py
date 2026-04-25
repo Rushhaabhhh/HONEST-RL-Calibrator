@@ -1,6 +1,6 @@
-"""Baseline evaluation of Qwen2.5-3B-Instruct against the HONEST environment.
+"""Baseline evaluation for calibration-focused HONEST training.
 
-Evaluates 3 domains × 5 difficulties = 15 conditions, 20 problems each.
+Evaluates 3 domains × 5 difficulties = 15 conditions, configurable samples each.
 Results are saved to eval/baseline_results.json.
 
 Usage:
@@ -22,12 +22,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from server.generators import code_gen, logic_gen, math_gen  # noqa: E402
 from server.reward import compute_reward, parse_action  # noqa: E402
 from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  # noqa: E402
+from calibration_profiles import (  # noqa: E402
+    REASONING_MODES,
+    SUPPORTED_PRESETS,
+    get_preset,
+    prompt_templates,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 DOMAINS = ["math", "code", "logic"]
 DIFFICULTIES = [1, 2, 3, 4, 5]
 DEFAULT_SAMPLES = 20
@@ -39,36 +45,6 @@ GENERATORS = {
 }
 
 # ---------------------------------------------------------------------------
-# System prompt (matches CLAUDE.md format spec)
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """\
-You are a precise and well-calibrated AI assistant.
-
-When answering questions, you MUST respond in EXACTLY this format:
-<reasoning>
-Briefly think step-by-step to solve the problem.
-</reasoning>
-<answer>YOUR_ANSWER_HERE</answer>
-<confidence>0.X</confidence>
-
-Where:
-- YOUR_ANSWER_HERE is your best answer to the question
-- 0.X is a number between 0.0 and 1.0 representing how confident you are
-
-Rules:
-- Confidence 1.0 = completely certain
-- Confidence 0.5 = 50/50 guess
-- Confidence 0.0 = completely uncertain
-- If you are very unsure, use <abstain/> instead
-- Never include explanations outside the XML tags
-- For numeric answers, give the number only (no units unless asked)
-- For string answers, give the exact value only"""
-
-USER_TEMPLATE = "{question}\n\nThink step-by-step in the <reasoning> block, then provide your final answer and confidence."
-
-
-# ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
@@ -77,32 +53,20 @@ def load_model(model_id: str, device: str):
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from peft import PeftModel
     except ImportError:
-        print("ERROR: Install with: pip install transformers accelerate torch peft")
+        print("ERROR: Install with: pip install transformers accelerate torch")
         sys.exit(1)
-
-    # Check if the path is a LoRA adapter
-    is_peft = os.path.exists(os.path.join(model_id, "adapter_config.json"))
-    
-    # If it is a peft adapter, we must load the base model first
-    base_model_id = "Qwen/Qwen2.5-3B-Instruct" if is_peft else model_id
 
     print(f"Loading tokenizer: {model_id} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
-    print(f"Loading base model: {base_model_id} (device={device}) ...")
+    print(f"Loading model: {model_id} (device={device}) ...")
     model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
+        model_id,
         torch_dtype="auto",
         device_map=device,
         trust_remote_code=True,
     )
-    
-    if is_peft:
-        print(f"Applying LoRA adapter from: {model_id} ...")
-        model = PeftModel.from_pretrained(model, model_id)
-        
     model.eval()
     print("Model loaded.\n")
     return model, tokenizer
@@ -116,14 +80,16 @@ def generate_response(
     model,
     tokenizer,
     question: str,
-    max_new_tokens: int = 2048,
+    system_prompt: str,
+    user_template: str,
+    max_new_tokens: int = 128,
 ) -> str:
     """Run one inference pass using the chat template."""
     import torch
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_TEMPLATE.format(question=question)},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_template.format(question=question)},
     ]
     text = tokenizer.apply_chat_template(
         messages,
@@ -157,6 +123,9 @@ def evaluate_condition(
     domain: str,
     difficulty: int,
     n_samples: int,
+    system_prompt: str,
+    user_template: str,
+    max_new_tokens: int,
     verbose: bool = False,
     response_fn=None,
 ) -> dict:
@@ -169,7 +138,14 @@ def evaluate_condition(
         seed = (difficulty * 1000) + i
         question, ground_truth = generator(difficulty, seed=seed)
 
-        raw = _generate(model, tokenizer, question)
+        raw = _generate(
+            model,
+            tokenizer,
+            question,
+            system_prompt=system_prompt,
+            user_template=user_template,
+            max_new_tokens=max_new_tokens,
+        )
         parsed = parse_action(raw)
 
         format_valid = parsed["type"] in ("answer", "abstain")
@@ -309,10 +285,28 @@ def main():
                         help="Skip model loading; generate dummy responses for testing")
     parser.add_argument("--model", type=str, default=MODEL_ID,
                         help=f"Model ID or local path to evaluate (default: {MODEL_ID})")
+    parser.add_argument(
+        "--model-preset",
+        choices=["auto", *SUPPORTED_PRESETS],
+        default="auto",
+        help="Model calibration preset metadata; auto infers from --model.",
+    )
+    parser.add_argument(
+        "--reasoning-mode",
+        choices=list(REASONING_MODES),
+        default="optional",
+        help="Prompt mode to match training/eval style.",
+    )
+    parser.add_argument("--max-new-tokens", type=int, default=512,
+                        help="Generation token budget for evaluation.")
+    parser.add_argument("--omit-samples", action="store_true",
+                        help="Do not include per-sample rows in output json (smaller file).")
     args = parser.parse_args()
 
     # Allow CLI override of model — used to eval post-RL merged model
     eval_model_id = args.model
+    preset = get_preset(eval_model_id, args.model_preset)
+    system_prompt, user_template = prompt_templates(args.reasoning_mode)
 
     if args.dry_run:
         print("DRY-RUN mode: using stub response fn (correct format, fixed answer).\n")
@@ -334,6 +328,9 @@ def main():
             t0 = time.time()
             result = evaluate_condition(
                 model, tokenizer, domain, difficulty, args.samples,
+                system_prompt=system_prompt,
+                user_template=user_template,
+                max_new_tokens=args.max_new_tokens,
                 verbose=args.verbose,
                 response_fn=response_fn,
             )
@@ -346,27 +343,41 @@ def main():
 
     # --- global aggregation ---
     all_confidences, all_correctness = [], []
+    all_rewards = []
+    total_correct = 0
+    total_format_valid = 0
+    total_samples = 0
     for c in conditions.values():
         for s in c.get("samples", []):
+            total_samples += 1
+            total_format_valid += 1 if s["format_valid"] else 0
+            total_correct += 1 if s["correct"] is True else 0
+            all_rewards.append(float(s["reward"]))
             if s["confidence"] is not None:
                 all_confidences.append(s["confidence"])
                 all_correctness.append(1 if s["correct"] else 0)
 
     overall = {
-        "accuracy": round(
-            sum(c["accuracy"] for c in conditions.values()) / len(conditions), 4
-        ),
+        "accuracy": round((total_correct / total_samples) if total_samples else 0.0, 4),
+        "format_rate": round((total_format_valid / total_samples) if total_samples else 0.0, 4),
         "ece": round(compute_ece(all_confidences, all_correctness), 4),
         "ace": round(compute_ace(all_confidences, all_correctness), 4),
         "mce": round(compute_mce(all_confidences, all_correctness), 4),
         "brier": round(compute_brier(all_confidences, all_correctness), 4),
-        "mean_reward": round(
-            sum(c["mean_reward"] for c in conditions.values()) / len(conditions), 4
-        ),
+        "mean_reward": round((sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0, 4),
+        "n_answered": len(all_confidences),
+        "n_total": total_samples,
     }
+
+    if args.omit_samples:
+        for c in conditions.values():
+            c.pop("samples", None)
 
     output = {
         "model": eval_model_id,
+        "preset": preset.name,
+        "reasoning_mode": args.reasoning_mode,
+        "max_new_tokens": args.max_new_tokens,
         "n_samples_per_condition": args.samples,
         "conditions": conditions,
         "overall": overall,

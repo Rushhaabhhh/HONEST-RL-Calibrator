@@ -18,7 +18,6 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +29,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from server.reward import compute_reward, parse_action           # noqa: E402
 from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  # noqa: E402
 from server.generators import code_gen, logic_gen, math_gen      # noqa: E402
+from calibration_profiles import (  # noqa: E402
+    REASONING_MODES,
+    SUPPORTED_PRESETS,
+    get_preset,
+    prompt_templates,
+)
 
 GENERATORS = {
     "math":  math_gen.generate,
@@ -39,33 +44,6 @@ GENERATORS = {
 
 DOMAINS      = ["math", "code", "logic"]
 DIFFICULTIES = [1, 2, 3, 4, 5]
-
-SYSTEM_PROMPT = """\
-You are a precise and well-calibrated AI assistant.
-
-When answering questions, you MUST respond in EXACTLY this format:
-<answer>YOUR_ANSWER_HERE</answer><confidence>0.X</confidence>
-
-Where:
-- YOUR_ANSWER_HERE is your best answer to the question
-- 0.X is a number between 0.0 and 1.0 representing how confident you are
-
-Rules:
-- Confidence 1.0 = completely certain
-- Confidence 0.5 = 50/50 guess
-- Confidence 0.0 = completely uncertain
-- If you are very unsure, use <abstain/> instead
-- Never include explanations outside the XML tags
-- For numeric answers, give the number only (no units unless asked)
-- For string answers, give the exact value only
-
-Example responses:
-<answer>42</answer><confidence>0.9</confidence>
-<answer>Paris</answer><confidence>0.8</confidence>
-<abstain/>"""
-
-USER_TEMPLATE = "{question}\n\nRespond only with the XML format specified."
-
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -105,11 +83,18 @@ def load_model(model_id: str, adapter_path: Optional[str], device: str):
 # Inference
 # ---------------------------------------------------------------------------
 
-def generate_response(model, tokenizer, question: str, max_new_tokens: int = 128) -> str:
+def generate_response(
+    model,
+    tokenizer,
+    question: str,
+    system_prompt: str,
+    user_template: str,
+    max_new_tokens: int = 128,
+) -> str:
     import torch
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": USER_TEMPLATE.format(question=question)},
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_template.format(question=question)},
     ]
     text   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
@@ -155,7 +140,15 @@ def _evaluate_records(records: list) -> dict:
     }
 
 
-def run_indist_eval(model, tokenizer, n_samples: int, response_fn=None) -> dict:
+def run_indist_eval(
+    model,
+    tokenizer,
+    n_samples: int,
+    system_prompt: str,
+    user_template: str,
+    max_new_tokens: int,
+    response_fn=None,
+) -> dict:
     """Run in-distribution evaluation across all 15 (domain, difficulty) conditions."""
     _generate = response_fn or generate_response
     conditions = {}
@@ -173,7 +166,14 @@ def run_indist_eval(model, tokenizer, n_samples: int, response_fn=None) -> dict:
             for i in range(n_samples):
                 seed     = (difficulty * 1000) + i
                 question, ground_truth = GENERATORS[domain](difficulty, seed=seed)
-                raw      = _generate(model, tokenizer, question)
+                raw = _generate(
+                    model,
+                    tokenizer,
+                    question,
+                    system_prompt=system_prompt,
+                    user_template=user_template,
+                    max_new_tokens=max_new_tokens,
+                )
                 parsed   = parse_action(raw)
                 correct: Optional[bool] = None
                 confidence: Optional[float] = None
@@ -205,7 +205,15 @@ def run_indist_eval(model, tokenizer, n_samples: int, response_fn=None) -> dict:
     return conditions
 
 
-def run_ood_eval(model, tokenizer, ood_dir: Path, response_fn=None) -> dict:
+def run_ood_eval(
+    model,
+    tokenizer,
+    ood_dir: Path,
+    system_prompt: str,
+    user_template: str,
+    max_new_tokens: int,
+    response_fn=None,
+) -> dict:
     """Run OOD evaluation on medical and legal jsonl files."""
     _generate = response_fn or generate_response
     results   = {}
@@ -226,7 +234,14 @@ def run_ood_eval(model, tokenizer, ood_dir: Path, response_fn=None) -> dict:
         for row in rows:
             question     = row["question"]
             ground_truth = row["answer"]
-            raw          = _generate(model, tokenizer, question)
+            raw = _generate(
+                model,
+                tokenizer,
+                question,
+                system_prompt=system_prompt,
+                user_template=user_template,
+                max_new_tokens=max_new_tokens,
+            )
             parsed       = parse_action(raw)
 
             correct: Optional[bool] = None
@@ -317,7 +332,7 @@ def generate_reliability_plots(full_results: dict, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Full HONEST-RL evaluation pipeline")
-    parser.add_argument("--model-id",          type=str,  default="Qwen/Qwen2.5-3B-Instruct")
+    parser.add_argument("--model-id",          type=str,  default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--adapter-path",      type=str,  default=None,
                         help="Path to trained LoRA adapter dir (merged into base model)")
     parser.add_argument("--baseline-results",  type=str,  default="eval/baseline_results.json",
@@ -326,12 +341,27 @@ def main():
     parser.add_argument("--output",            type=str,  default="eval/full_results.json")
     parser.add_argument("--samples",           type=int,  default=20)
     parser.add_argument("--device",            type=str,  default="auto")
+    parser.add_argument("--max-new-tokens",    type=int,  default=512)
+    parser.add_argument(
+        "--model-preset",
+        choices=["auto", *SUPPORTED_PRESETS],
+        default="auto",
+        help="Model calibration preset metadata; auto infers from --model-id.",
+    )
+    parser.add_argument(
+        "--reasoning-mode",
+        choices=list(REASONING_MODES),
+        default="optional",
+        help="Prompt mode used at evaluation time.",
+    )
     parser.add_argument("--skip-indist",       action="store_true",
                         help="Skip in-distribution eval (OOD only)")
     parser.add_argument("--skip-ood",         action="store_true")
     parser.add_argument("--dry-run",           action="store_true",
                         help="Use stub inferencer — no GPU needed")
     args = parser.parse_args()
+    preset = get_preset(args.model_id, args.model_preset)
+    system_prompt, user_template = prompt_templates(args.reasoning_mode)
 
     # Stub response function for dry-run
     if args.dry_run:
@@ -344,6 +374,9 @@ def main():
 
     output = {
         "model_id":     args.model_id,
+        "preset":       preset.name,
+        "reasoning_mode": args.reasoning_mode,
+        "max_new_tokens": args.max_new_tokens,
         "adapter_path": args.adapter_path,
         "timestamp":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -351,7 +384,15 @@ def main():
     # ── In-distribution ───────────────────────────────────────────────────────
     if not args.skip_indist:
         print("\n── In-distribution evaluation ──────────────────────────────────────")
-        indist = run_indist_eval(model, tokenizer, args.samples, response_fn)
+        indist = run_indist_eval(
+            model,
+            tokenizer,
+            args.samples,
+            system_prompt=system_prompt,
+            user_template=user_template,
+            max_new_tokens=args.max_new_tokens,
+            response_fn=response_fn,
+        )
         output["in_distribution"] = indist
 
         # Load baseline for comparison
@@ -360,6 +401,12 @@ def main():
             with open(bp) as f:
                 baseline_data = json.load(f)
             baseline_conds = baseline_data.get("conditions", {})
+            baseline_mode = baseline_data.get("reasoning_mode")
+            if baseline_mode and baseline_mode != args.reasoning_mode:
+                print(
+                    f"⚠ Baseline reasoning_mode={baseline_mode} differs from current "
+                    f"run reasoning_mode={args.reasoning_mode}. Comparison may be biased."
+                )
             print_comparison(baseline_conds, indist)
         else:
             print(f"\n(No baseline file at {bp} — skipping comparison table)")
@@ -367,7 +414,15 @@ def main():
     # ── OOD ──────────────────────────────────────────────────────────────────
     if not args.skip_ood:
         print("\n── OOD evaluation ──────────────────────────────────────────────────")
-        ood_results = run_ood_eval(model, tokenizer, Path(args.ood_dir), response_fn)
+        ood_results = run_ood_eval(
+            model,
+            tokenizer,
+            Path(args.ood_dir),
+            system_prompt=system_prompt,
+            user_template=user_template,
+            max_new_tokens=args.max_new_tokens,
+            response_fn=response_fn,
+        )
         output["ood"] = ood_results
 
     # ── Overall ───────────────────────────────────────────────────────────────
@@ -381,16 +436,33 @@ def main():
                     all_corrects.append(1 if s["correct"] else 0)
 
     if all_confs:
+        all_rewards = []
+        total = 0
+        total_correct = 0
+        total_format_valid = 0
+        for section in ["in_distribution", "ood"]:
+            section_data = output.get(section, {})
+            for cond in section_data.values():
+                for s in cond.get("samples", []):
+                    total += 1
+                    total_correct += 1 if s["correct"] is True else 0
+                    total_format_valid += 1 if s["format_valid"] else 0
+                    all_rewards.append(float(s["reward"]))
         output["overall"] = {
             "n_samples": len(all_confs),
             "brier":     round(compute_brier(all_confs, all_corrects), 4),
             "ece":       round(compute_ece(all_confs, all_corrects), 4),
             "ace":       round(compute_ace(all_confs, all_corrects), 4),
             "mce":       round(compute_mce(all_confs, all_corrects), 4),
+            "accuracy": round((total_correct / total) if total else 0.0, 4),
+            "format_rate": round((total_format_valid / total) if total else 0.0, 4),
+            "mean_reward": round((sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0, 4),
         }
         o = output["overall"]
         print(f"\n── Overall ─ n={o['n_samples']}  "
-              f"Brier={o['brier']:.4f}  ECE={o['ece']:.4f}  ACE={o['ace']:.4f}  MCE={o['mce']:.4f}")
+              f"Acc={o['accuracy']:.1%}  Fmt={o['format_rate']:.1%}  "
+              f"Brier={o['brier']:.4f}  ECE={o['ece']:.4f}  "
+              f"ACE={o['ace']:.4f}  MCE={o['mce']:.4f}  Reward={o['mean_reward']:.4f}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
     out_path = Path(args.output)
