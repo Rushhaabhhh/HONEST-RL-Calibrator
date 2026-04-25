@@ -43,6 +43,12 @@ class TestVerifyAnswer:
         # whitespace + comma + float-int
         assert verify_answer(" 1,000.0 ", "1000") is True
 
+    def test_code_domain_falls_back_without_metadata(self):
+        assert verify_answer("11", "11", domain="code") is True
+
+    def test_logic_domain_falls_back_without_metadata(self):
+        assert verify_answer("alice", "Alice", domain="logic") is True
+
 
 # ===========================================================================
 # parse_action

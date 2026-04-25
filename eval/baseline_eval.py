@@ -20,8 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from server.generators import code_gen, logic_gen, math_gen  # noqa: E402
-from server.reward import parse_action  # noqa: E402
-from server.verifier import verify_answer  # noqa: E402
+from server.reward import compute_reward, parse_action  # noqa: E402
 from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -168,20 +167,12 @@ def evaluate_condition(
         correct: Optional[bool] = None
         confidence: Optional[float] = None
 
+        reward, correct = compute_reward(parsed, ground_truth, difficulty, domain=domain)
+
         if parsed["type"] == "answer":
-            correct = verify_answer(parsed["answer"], ground_truth)
             confidence = parsed["confidence"]
         elif parsed["type"] == "abstain":
             confidence = 0.0  # treat abstain as zero-confidence for calibration
-
-        # Brier reward only for answer actions (same as environment)
-        if parsed["type"] == "answer":
-            target = 1.0 if correct else 0.0
-            reward = -((parsed["confidence"] - target) ** 2) + 0.02
-        elif parsed["type"] == "malformed":
-            reward = -0.5
-        else:  # abstain on difficulty < 7 → -0.3
-            reward = -0.3
 
         records.append({
             "question": question[:120],

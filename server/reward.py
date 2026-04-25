@@ -1,8 +1,7 @@
 """Action parsing, reward computation, and multi-reward functions for GRPO."""
 
-import math
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from server.verifier import verify_answer
 
@@ -50,6 +49,8 @@ def compute_reward(
     parsed: dict,
     ground_truth: str,
     difficulty: int,
+    domain: Optional[str] = None,
+    verification_metadata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, Optional[bool]]:
     """
     Compute (reward, correctness_or_None) from a parsed action.
@@ -76,7 +77,12 @@ def compute_reward(
 
     if action_type == "answer":
         try:
-            correct = verify_answer(parsed["answer"], ground_truth)
+            correct = verify_answer(
+                parsed["answer"],
+                ground_truth,
+                domain=domain,
+                verification_metadata=verification_metadata,
+            )
         except Exception:
             # Defensive: treat any verifier exception as an incorrect answer
             correct = False
@@ -110,9 +116,24 @@ def reward_brier(
     **kwargs,
 ) -> List[float]:
     rewards = []
-    for comp, gt, diff in zip(completions, ground_truth, difficulty):
+    domains = kwargs.get("domain")
+    verification_metadatas = kwargs.get("verification_metadata")
+
+    for idx, (comp, gt, diff) in enumerate(zip(completions, ground_truth, difficulty)):
+        domain = domains[idx] if isinstance(domains, list) and idx < len(domains) else None
+        verification_metadata = (
+            verification_metadatas[idx]
+            if isinstance(verification_metadatas, list) and idx < len(verification_metadatas)
+            else None
+        )
         parsed = parse_action(comp)
-        r, _ = compute_reward(parsed, str(gt), int(diff))
+        r, _ = compute_reward(
+            parsed,
+            str(gt),
+            int(diff),
+            domain=domain,
+            verification_metadata=verification_metadata,
+        )
         rewards.append(float(r))
     return rewards
 

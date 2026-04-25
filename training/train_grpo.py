@@ -21,7 +21,6 @@ import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainerCallback
-from trl import GRPOConfig, GRPOTrainer
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -144,10 +143,10 @@ def _is_bfloat16_supported():
         return is_bfloat16_supported()
     return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
-def load_model_unsloth(hf_token):
-    log.info(f"Loading {MODEL_ID} via Unsloth (4-bit)...")
+def load_model_unsloth(hf_token, model_id: str):
+    log.info(f"Loading {model_id} via Unsloth (4-bit)...")
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=MODEL_ID,
+        model_name=model_id,
         max_seq_length=MAX_SEQ_LEN,
         dtype=None,
         load_in_4bit=True,
@@ -169,8 +168,8 @@ def load_model_unsloth(hf_token):
     )
     return model, tokenizer
 
-def load_model_standard(hf_token):
-    log.info(f"Loading {MODEL_ID} via HF transformers (4-bit bnb)...")
+def load_model_standard(hf_token, model_id: str):
+    log.info(f"Loading {model_id} via HF transformers (4-bit bnb)...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -178,14 +177,14 @@ def load_model_standard(hf_token):
         bnb_4bit_use_double_quant=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_ID, trust_remote_code=True, token=hf_token,
+        model_id, trust_remote_code=True, token=hf_token,
     )
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
@@ -236,25 +235,73 @@ def main():
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--no-wandb",  action="store_true")
+    parser.add_argument("--model-id", type=str, default=MODEL_ID)
+    parser.add_argument("--output-dir", type=str, default=OUTPUT_DIR)
+    parser.add_argument("--prompt-dataset-size", type=int, default=N_PROMPT_DATASET)
+    parser.add_argument("--num-generations", type=int, default=16)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
+    parser.add_argument("--max-completion-length", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--learning-rate", type=float, default=1.5e-6)
+    parser.add_argument("--beta", type=float, default=0.04)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--warmup-steps", type=int, default=10)
+    parser.add_argument("--save-steps", type=int, default=50)
+    parser.add_argument("--logging-steps", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--colab-profile",
+        choices=["none", "t4", "l4", "a100"],
+        default="none",
+        help="Apply Colab-friendly overrides for smaller GPUs.",
+    )
     args = parser.parse_args()
 
+    if args.colab_profile == "t4":
+        args.num_generations = 4
+        args.gradient_accumulation_steps = max(args.gradient_accumulation_steps, 16)
+        args.max_completion_length = min(args.max_completion_length, 768)
+    elif args.colab_profile == "l4":
+        args.num_generations = min(args.num_generations, 8)
+        args.max_completion_length = min(args.max_completion_length, 1024)
+    elif args.colab_profile == "a100":
+        args.num_generations = min(args.num_generations, 16)
+
     hf_token  = os.environ.get("HF_TOKEN")
-    env_url   = os.environ.get("HONEST_ENV_URL", "")
+    env_url   = os.environ.get("HONEST_ENV_URL", "").strip()
     wandb_key = os.environ.get("WANDB_API_KEY", "")
     report_to = "none" if (args.no_wandb or not wandb_key) else "wandb"
 
+    if args.dry_run:
+        dry_completions = [
+            "<answer>42</answer><confidence>0.9</confidence>",
+            "<answer>41</answer><confidence>0.5</confidence>",
+            "<abstain/>",
+            "malformed output",
+        ]
+        dry_gt = ["42", "42", "42", "42"]
+        dry_diff = [1, 1, 1, 1]
+        dry_domains = ["math", "math", "math", "math"]
+        print("Dry run: reward smoke test")
+        print("reward_brier:", reward_brier(dry_completions, [], dry_gt, dry_diff, domain=dry_domains))
+        print("reward_format:", reward_format(dry_completions))
+        return
+
     if not torch.cuda.is_available() and not args.dry_run:
         raise SystemExit("No GPU detected.")
+
+    from trl import GRPOConfig, GRPOTrainer
 
     log.info(f"GPU: {torch.cuda.get_device_name(0)}")
     log.info(f"Torch: {torch.__version__}")
 
     if UNSLOTH_AVAILABLE:
-        model, tokenizer = load_model_unsloth(hf_token)
+        model, tokenizer = load_model_unsloth(hf_token, args.model_id)
     else:
-        model, tokenizer = load_model_standard(hf_token)
+        model, tokenizer = load_model_standard(hf_token, args.model_id)
 
-    raw_records   = build_prompt_dataset(N_PROMPT_DATASET, tokenizer)
+    raw_records   = build_prompt_dataset(args.prompt_dataset_size, tokenizer)
     train_dataset = Dataset.from_list(raw_records)
     bf16 = _is_bfloat16_supported()
 
@@ -262,30 +309,30 @@ def main():
     logged_brier = wrap_with_logging(reward_brier, _step_ref)
 
     grpo_config = GRPOConfig(
-        output_dir=OUTPUT_DIR,
-        num_generations=16,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        output_dir=args.output_dir,
+        num_generations=args.num_generations,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         
-        max_completion_length=2048,
-        temperature=1.0,
-        learning_rate=1.5e-6,             
+        max_completion_length=args.max_completion_length,
+        temperature=args.temperature,
+        learning_rate=args.learning_rate,
         
-        beta=0.04,
-        max_grad_norm=1.0,
+        beta=args.beta,
+        max_grad_norm=args.max_grad_norm,
         
         scale_rewards=True,
         num_iterations=1,
         num_train_epochs=1,
         lr_scheduler_type="cosine",
-        warmup_steps=10,
-        save_steps=50,
-        logging_steps=1,
+        warmup_steps=args.warmup_steps,
+        save_steps=args.save_steps,
+        logging_steps=args.logging_steps,
         fp16=not bf16,
         bf16=bf16,
         optim="adamw_8bit",
         report_to=report_to,
-        seed=42,
+        seed=args.seed,
         
         environment_factory=lambda: HonestEnv(base_url=env_url).sync() if env_url else None,
         **({  "max_steps": args.max_steps} if args.max_steps else {}),
@@ -303,18 +350,28 @@ def main():
     )
 
     log.info("=" * 60)
-    log.info(f"Model:   {MODEL_ID}")
+    log.info(f"Model:   {args.model_id}")
     log.info(f"Backend: {'Unsloth' if UNSLOTH_AVAILABLE else 'HF transformers'}")
     log.info(f"GPU:     {torch.cuda.get_device_name(0)} | bf16 supported: {bf16}")
     log.info(f"Reward:  {'live @ ' + env_url if env_url else 'local multi-reward'}")
-    log.info("KL beta: 0.005  |  max_grad_norm: 1.0  |  lr: 1.5e-6  |  temp: 1.0")
+    log.info(
+        "GRPO: gens=%d | bs=%d | ga=%d | max_len=%d | beta=%.4f | grad_norm=%.2f | lr=%.2e | temp=%.2f",
+        args.num_generations,
+        args.per_device_train_batch_size,
+        args.gradient_accumulation_steps,
+        args.max_completion_length,
+        args.beta,
+        args.max_grad_norm,
+        args.learning_rate,
+        args.temperature,
+    )
     log.info("=" * 60)
 
     t0 = time.time()
     trainer.train()
     log.info(f"Training complete in {(time.time()-t0)/60:.1f} min.")
 
-    out_path = Path(OUTPUT_DIR)
+    out_path = Path(args.output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(out_path / "final_adapters"))
     tokenizer.save_pretrained(str(out_path / "final_adapters"))

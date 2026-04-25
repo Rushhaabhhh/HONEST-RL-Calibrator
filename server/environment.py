@@ -133,7 +133,12 @@ class HonestEnvironment(Environment):
             )
 
         # STANDARD MDP LOGIC: Handle <answer> or <abstain>
-        reward_value, correctness = compute_reward(parsed, self._current_answer, difficulty)
+        reward_value, correctness = compute_reward(
+            parsed,
+            self._current_answer,
+            difficulty,
+            domain=domain,
+        )
 
         # Append the single authoritative history record for this step.
         # update_difficulty() will read it (for rolling accuracy) and must
@@ -152,7 +157,12 @@ class HonestEnvironment(Environment):
         self._state.episode_history.append(step_record)
 
         self._state.episode_step += 1
-        _, diff_changed = update_difficulty(self._state, correctness, domain=domain)
+        difficulty_update = update_difficulty(self._state, correctness, domain=domain)
+        # Tests may patch update_difficulty without a tuple return value.
+        if isinstance(difficulty_update, tuple) and len(difficulty_update) >= 2:
+            diff_changed = bool(difficulty_update[1])
+        else:
+            diff_changed = False
         if diff_changed:
             step_record["difficulty_changed"] = True
 

@@ -24,8 +24,16 @@ def verify_answer(
         if domain == "math":
             return verify_math_answer(agent_answer, ground_truth)
         elif domain == "code":
+            # Environment-style code tasks use scalar/string answers, while
+            # dataset-style code tasks provide executable verification metadata.
+            if not verification_metadata:
+                return _normalize(agent_answer) == _normalize(ground_truth)
             return verify_code_answer(agent_answer, verification_metadata)
         elif domain == "logic":
+            # Environment-style logic tasks are often direct strings (e.g. a name/color),
+            # whereas dataset-style tasks use structured canonical JSON solutions.
+            if not verification_metadata:
+                return _normalize(agent_answer) == _normalize(ground_truth)
             passed, _acc = verify_logic_answer(agent_answer, ground_truth, verification_metadata)
             return passed
         else:
