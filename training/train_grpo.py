@@ -27,7 +27,7 @@ from trl import GRPOConfig, GRPOTrainer
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from server.generators import code_gen, logic_gen, math_gen
+from data.sampler.unified_sampler import generate_code, generate_logic, generate_math
 from server.reward import (
     parse_action,
     compute_reward,
@@ -51,9 +51,9 @@ MAX_SEQ_LEN      = 2048
 N_PROMPT_DATASET = 3000 
 
 GENERATORS = {
-    "math":  math_gen.generate,
-    "code":  code_gen.generate,
-    "logic": logic_gen.generate,
+    "math":  generate_math,
+    "code":  generate_code,
+    "logic": generate_logic,
 }
 
 SYSTEM_PROMPT = """You are a precise and well-calibrated AI assistant.
@@ -98,10 +98,10 @@ def build_prompt_dataset(n: int, tokenizer) -> list:
         seed = 500_000 + attempts
         
         try:
-            question, ground_truth = GENERATORS[domain](difficulty, seed=seed)
+            question, ground_truth, problem_id = GENERATORS[domain](difficulty, seed=seed)
         except Exception:
             continue
-            
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": USER_TEMPLATE.format(question=question)},
@@ -109,12 +109,13 @@ def build_prompt_dataset(n: int, tokenizer) -> list:
         prompt_text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        
+
         records.append({
             "prompt":       prompt_text,
             "ground_truth": str(ground_truth),
             "difficulty":   difficulty,
             "domain":       domain,
+            "problem_id":   problem_id,
         })
         
     log.info(f"  -> {len(records)} prompts ready ({attempts} attempts).")
