@@ -6,8 +6,9 @@ from typing import List, Optional, Tuple
 
 from server.verifier import verify_answer
 
+
 _ANSWER_RE = re.compile(
-    r"<reasoning>(.*?)</reasoning>\s*<answer>(.*?)</answer>\s*<analysis>(.*?)</analysis>\s*<confidence>(.*?)</confidence>",
+    r"<reasoning>(.*?)</reasoning>\s*<answer>(.*?)</answer>\s*<confidence>(.*?)</confidence>",
     re.DOTALL | re.IGNORECASE,
 )
 _ABSTAIN_RE = re.compile(r"<abstain\s*/>", re.IGNORECASE)
@@ -18,84 +19,37 @@ FORMAT_BONUS      = 0.05
 
 
 def parse_action(raw_text: str) -> dict:
-    text = raw_text.strip()
-
-    if _ABSTAIN_RE.search(text):
+    # Try hint first
+    if re.search(r'<request_hint\s*/?>', raw_text):
+        return {"type": "hint"}
+        
+    # Try abstain
+    if re.search(r'<abstain\s*/?>', raw_text):
         return {"type": "abstain"}
-
-    m = _ANSWER_RE.search(text)
-    if m:
-        # Extract all blocks but do not strictly grade their content
-        reasoning_str = m.group(1).strip()
-        answer_str    = m.group(2).strip()
-        analysis_str  = m.group(3).strip()
-        conf_str      = m.group(4).strip()
-
-        # 🔥 FIX: Reject if the model skips thinking, answering, or analyzing
-        if not answer_str or not reasoning_str or not analysis_str:
-            return {"type": "malformed"}
-
+        
+    # Try answer + confidence
+    answer_match = re.search(r'<answer>(.*?)</answer>', raw_text, re.DOTALL)
+    conf_match = re.search(r'<confidence>([-?\d.]+)</confidence>', raw_text)
+    
+    if answer_match and conf_match:
         try:
-            confidence = float(conf_str)
+            confidence = float(conf_match.group(1))
+            confidence = max(0.0, min(1.0, confidence)) # Clamp
+            return {
+                "type": "answer",
+                "answer": answer_match.group(1).strip(),
+                "confidence": confidence
+            }
         except ValueError:
             return {"type": "malformed"}
-
-        if not math.isfinite(confidence):
-            return {"type": "malformed"}
-
-        confidence = max(0.0, min(1.0, confidence))
-
-        return {
-            "type":       "answer",
-            "reasoning":  reasoning_str,
-            "answer":     answer_str,
-            "analysis":   analysis_str,  # Captured for potential future logging/debugging
-            "confidence": confidence,
-        }
-
+            
     return {"type": "malformed"}
-
-
-def _verify(
-    model_answer: str,
-    ground_truth: str,
-    problem_id: Optional[str],
-    domain: Optional[str],
-) -> bool:
-    """Route to the domain-aware verifier.
-
-    * Procedural problems (``problem_id`` prefix ``procedural_``) use plain
-      normalised string-match against ``ground_truth`` — they are generated
-      on the fly and not stored in the sampler's ``_by_id`` table, and their
-      canonical answer is a simple string (not a JSON grid), so we must
-      bypass the domain-specific JSON-grid logic verifier.
-    * Curated dataset problems are dispatched through
-      ``UnifiedSampler.verify(problem_id, model_answer)`` so each domain
-      uses its proper verifier (SymPy / subprocess / JSON-grid).
-    * If no ``problem_id`` is provided, fall back to the legacy
-      ``verify_answer(...)`` signature using ``domain`` + ground_truth.
-    """
-    if problem_id and problem_id.startswith("procedural_"):
-        # Force domain=None so verify_answer uses the plain string-normalise
-        # fallback rather than the JSON-grid logic verifier.
-        return verify_answer(model_answer, ground_truth, domain=None)
-
-    if problem_id:
-        try:
-            from data.sampler.unified_sampler import get_sampler
-            return get_sampler().verify(problem_id, model_answer)
-        except Exception:
-            # Fall through to the legacy path on any sampler/verifier failure.
-            pass
-    return verify_answer(model_answer, ground_truth, domain)
 
 
 def compute_reward(
     parsed: dict,
     ground_truth: str,
     difficulty: int,
-    problem_id: Optional[str] = None,
-    domain: Optional[str] = None,
 ) -> Tuple[float, Optional[bool]]:
     """
     Compute (reward, correctness_or_None) from a parsed action.
@@ -122,17 +76,17 @@ def compute_reward(
 
     if action_type == "answer":
         try:
-            correct = _verify(parsed["answer"], ground_truth, problem_id, domain)
+            correct = verify_answer(parsed["answer"], ground_truth)
         except Exception:
             # Defensive: treat any verifier exception as an incorrect answer
             correct = False
-
+            
         target = 1.0 if correct else 0.0
-
+        
         # Scale Brier penalty by 0.5 to keep gradients stable
         brier = -0.5 * ((parsed["confidence"] - target) ** 2)
         reward = brier + FORMAT_BONUS
-
+        
         return (reward, correct)
 
     return (MALFORMED_PENALTY, None)
@@ -156,13 +110,9 @@ def reward_brier(
     **kwargs,
 ) -> List[float]:
     rewards = []
-    pid_list = kwargs.get("problem_id", [None] * len(completions))
-    domain_list = kwargs.get("domain", [None] * len(completions))
-    for comp, gt, diff, pid, dom in zip(
-        completions, ground_truth, difficulty, pid_list, domain_list
-    ):
+    for comp, gt, diff in zip(completions, ground_truth, difficulty):
         parsed = parse_action(comp)
-        r, _ = compute_reward(parsed, str(gt), int(diff), problem_id=pid, domain=dom)
+        r, _ = compute_reward(parsed, str(gt), int(diff))
         rewards.append(float(r))
     return rewards
 
@@ -190,13 +140,11 @@ def reward_accuracy(
 ) -> List[float]:
     """Correctness bonus: +0.10 if the answer is correct, 0.0 otherwise."""
     rewards = []
-    pid_list = kwargs.get("problem_id", [None] * len(completions))
-    domain_list = kwargs.get("domain", [None] * len(completions))
-    for comp, gt, pid, dom in zip(completions, ground_truth, pid_list, domain_list):
+    for comp, gt in zip(completions, ground_truth):
         parsed = parse_action(comp)
         if parsed["type"] == "answer":
             try:
-                correct = _verify(parsed["answer"], str(gt), pid, dom)
+                correct = verify_answer(parsed["answer"], str(gt))
             except Exception:
                 correct = False
             rewards.append(0.10 if correct else 0.0)

@@ -117,14 +117,14 @@ class TestComputeReward:
 
     def test_malformed_reward(self):
         r, c = compute_reward({"type": "malformed"}, "42", 3)
-        assert r == pytest.approx(-0.5)
+        assert r == pytest.approx(-0.20)
         assert c is None
 
     # --- abstain ---
 
     def test_abstain_low_difficulty(self):
         r, c = compute_reward({"type": "abstain"}, "42", 3)
-        assert r == pytest.approx(-0.3)
+        assert r == pytest.approx(-0.10)
         assert c is None
 
     def test_abstain_high_difficulty(self):
@@ -134,7 +134,7 @@ class TestComputeReward:
 
     def test_abstain_boundary_difficulty_6(self):
         r, c = compute_reward({"type": "abstain"}, "42", 6)
-        assert r == pytest.approx(-0.3)
+        assert r == pytest.approx(-0.10)
         assert c is None
 
     def test_abstain_boundary_difficulty_7(self):
@@ -149,14 +149,14 @@ class TestComputeReward:
         parsed = {"type": "answer", "answer": "42", "confidence": 1.0}
         r, c = compute_reward(parsed, "42", 3)
         assert c is True
-        # brier = -((1.0 - 1.0)**2) = 0.0; + format_bonus = 0.02
-        assert r == pytest.approx(0.02)
+        # brier = -0.5 * ((1.0 - 1.0)**2) = 0.0; + format_bonus = 0.05
+        assert r == pytest.approx(0.05)
 
     def test_correct_medium_confidence(self):
         parsed = {"type": "answer", "answer": "42", "confidence": 0.9}
         r, c = compute_reward(parsed, "42", 3)
         assert c is True
-        expected = -((0.9 - 1.0) ** 2) + 0.02
+        expected = -0.5 * ((0.9 - 1.0) ** 2) + 0.05
         assert r == pytest.approx(expected)
 
     def test_perfect_calibration_is_max_reward(self):
@@ -174,16 +174,16 @@ class TestComputeReward:
         parsed = {"type": "answer", "answer": "41", "confidence": 0.9}
         r, c = compute_reward(parsed, "42", 3)
         assert c is False
-        expected = -((0.9 - 0.0) ** 2) + 0.02   # ≈ -0.79
+        expected = -0.5 * ((0.9 - 0.0) ** 2) + 0.05   # ≈ -0.355
         assert r == pytest.approx(expected)
-        assert r < -0.5   # definitely a strong penalty
+        assert r < -0.3   # definitely a strong penalty
 
     def test_wrong_low_confidence_calibrated(self):
         """Wrong answer but honest low confidence: mild penalty (well-calibrated)."""
         parsed = {"type": "answer", "answer": "41", "confidence": 0.1}
         r, c = compute_reward(parsed, "42", 3)
         assert c is False
-        expected = -((0.1 - 0.0) ** 2) + 0.02   # ≈ 0.01
+        expected = -0.5 * ((0.1 - 0.0) ** 2) + 0.05   # ≈ 0.045
         assert r == pytest.approx(expected)
         assert r > -0.1   # much less painful than overconfident wrong
 
@@ -192,8 +192,8 @@ class TestComputeReward:
         parsed = {"type": "answer", "answer": "41", "confidence": 0.0}
         r, c = compute_reward(parsed, "42", 3)
         assert c is False
-        # brier = -((0 - 0)**2) = 0; + 0.02
-        assert r == pytest.approx(0.02)
+        # brier = -0.5 * ((0 - 0)**2) = 0; + 0.05
+        assert r == pytest.approx(0.05)
 
     # --- normalization integration ---
 
@@ -213,16 +213,16 @@ class TestComputeReward:
         p = parse_action("<answer>42</answer><confidence>0.9</confidence>")
         r, c = compute_reward(p, "42", 3)
         assert c is True
-        assert -0.1 < r <= 0.02   # "near 0" as spec states
+        assert -0.1 < r <= 0.05   # "near 0" as spec states
 
     def test_smoke_wrong_high_conf(self):
         p = parse_action("<answer>41</answer><confidence>0.9</confidence>")
         r, c = compute_reward(p, "42", 3)
         assert c is False
-        assert r == pytest.approx(-((0.9) ** 2) + 0.02)  # ≈ -0.79
+        assert r == pytest.approx(-0.5 * ((0.9) ** 2) + 0.05)  # ≈ -0.355
 
     def test_smoke_wrong_low_conf(self):
         p = parse_action("<answer>41</answer><confidence>0.1</confidence>")
         r, c = compute_reward(p, "42", 3)
         assert c is False
-        assert r == pytest.approx(-((0.1) ** 2) + 0.02)  # ≈ 0.01
+        assert r == pytest.approx(-0.5 * ((0.1) ** 2) + 0.05)  # ≈ 0.045

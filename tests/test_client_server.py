@@ -135,7 +135,7 @@ async def test_step_with_malformed_action_gives_minus_half(client: HonestEnv):
     await client.reset()
     action = HonestAction(raw_text=MALFORMED)
     result = await client.step(action)
-    assert result.reward == pytest.approx(-0.5)
+    assert result.reward == pytest.approx(-0.20)
 
 
 @pytest.mark.asyncio

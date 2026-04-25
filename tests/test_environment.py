@@ -101,7 +101,7 @@ class TestStep:
 
     def test_malformed_reward_is_minus_half(self, fresh_env):
         obs = fresh_env.step(HonestAction(raw_text=MALFORMED))
-        assert obs.reward == pytest.approx(-0.5)
+        assert obs.reward == pytest.approx(-0.20)
 
     def test_malformed_returns_no_correctness(self, fresh_env):
         fresh_env.step(HonestAction(raw_text=MALFORMED))

@@ -8,7 +8,6 @@ except Exception:
     print("Unsloth not available, using HF fallback.")
 
 import argparse
-import asyncio
 import logging
 import os
 import random
@@ -27,14 +26,13 @@ from trl import GRPOConfig, GRPOTrainer
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.sampler.unified_sampler import generate_code, generate_logic, generate_math
+from server.generators import code_gen, logic_gen, math_gen
+from client.client import HonestEnv
 from server.reward import (
-    parse_action,
-    compute_reward,
     reward_brier,
     reward_format,
-    reward_accuracy,
-    reward_anti_hedge,
+    # reward_accuracy,   # Commented out to prevent reward dilution
+    # reward_anti_hedge, # Commented out to prevent reward dilution
 )
 
 logging.basicConfig(
@@ -45,15 +43,14 @@ logging.basicConfig(
 log = logging.getLogger("grpo")
 
 MODEL_ID         = "Qwen/Qwen2.5-3B-Instruct"
-SFT_ADAPTERS_DIR = str(PROJECT_ROOT / "training" / "format_sft_adapters")
 OUTPUT_DIR       = "./honest-qwen-3b-grpo"
 MAX_SEQ_LEN      = 2048
 N_PROMPT_DATASET = 3000 
 
 GENERATORS = {
-    "math":  generate_math,
-    "code":  generate_code,
-    "logic": generate_logic,
+    "math":  math_gen.generate,
+    "code":  code_gen.generate,
+    "logic": logic_gen.generate,
 }
 
 SYSTEM_PROMPT = """You are a precise and well-calibrated AI assistant.
@@ -98,10 +95,10 @@ def build_prompt_dataset(n: int, tokenizer) -> list:
         seed = 500_000 + attempts
         
         try:
-            question, ground_truth, problem_id = GENERATORS[domain](difficulty, seed=seed)
+            question, ground_truth = GENERATORS[domain](difficulty, seed=seed)
         except Exception:
             continue
-
+            
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": USER_TEMPLATE.format(question=question)},
@@ -109,54 +106,19 @@ def build_prompt_dataset(n: int, tokenizer) -> list:
         prompt_text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-
+        
         records.append({
             "prompt":       prompt_text,
             "ground_truth": str(ground_truth),
             "difficulty":   difficulty,
             "domain":       domain,
-            "problem_id":   problem_id,
         })
         
     log.info(f"  -> {len(records)} prompts ready ({attempts} attempts).")
     return records
 
-# Async env-server reward (fallback to local Brier)
-
-async def _env_reward_async(prompt, completion, ground_truth, difficulty, env_url):
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{env_url}/reset") as resp:
-                reset_data = await resp.json()
-                
-            step_payload = {"session_id": reset_data.get("session_id", ""), "raw_text": completion}
-            async with session.post(f"{env_url}/step", json=step_payload) as resp:
-                step_data = await resp.json()
-            return float(step_data.get("reward", -0.5))
-            
-    except Exception as e:
-        log.warning(f"Server reward failed ({e}), using local Brier score.")
-        parsed = parse_action(completion)
-        r, _ = compute_reward(parsed, ground_truth, difficulty)
-        return float(r)
-
-
-def make_env_reward_fn(env_url):
-    def _fn(completions, prompts, ground_truth, difficulty, **kwargs):
-        loop = asyncio.new_event_loop()
-        try:
-            tasks = [
-                _env_reward_async(p, c, gt, diff, env_url)
-                for p, c, gt, diff in zip(prompts, completions, ground_truth, difficulty)
-            ]
-            return list(loop.run_until_complete(asyncio.gather(*tasks)))
-        finally:
-            loop.close()
-    return _fn
 
 # Reward distribution logging
-
 _reward_history: deque = deque(maxlen=500)
 
 def _log_reward_dist(rewards, step):
@@ -168,7 +130,6 @@ def _log_reward_dist(rewards, step):
             f"min={arr.min():.4f}  max={arr.max():.4f}  n={len(arr)}"
         )
 
-
 def wrap_with_logging(fn, step_ref):
     def _logged(completions, prompts, **kwargs):
         rewards = fn(completions, prompts, **kwargs)
@@ -178,12 +139,10 @@ def wrap_with_logging(fn, step_ref):
     return _logged
 
 # Model loading
-
 def _is_bfloat16_supported():
     if UNSLOTH_AVAILABLE:
         return is_bfloat16_supported()
     return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-
 
 def load_model_unsloth(hf_token):
     log.info(f"Loading {MODEL_ID} via Unsloth (4-bit)...")
@@ -209,7 +168,6 @@ def load_model_unsloth(hf_token):
         random_state=42,
     )
     return model, tokenizer
-
 
 def load_model_standard(hf_token):
     log.info(f"Loading {MODEL_ID} via HF transformers (4-bit bnb)...")
@@ -248,10 +206,7 @@ def load_model_standard(hf_token):
     return model, tokenizer
 
 # KL early-stopping callback 
-
 class KLEarlyStopCallback(TrainerCallback):
-    """Stop training if KL divergence exceeds threshold for too many consecutive steps."""
-
     def __init__(self, kl_threshold: float = 0.5, patience: int = 20):
         self.kl_threshold = kl_threshold
         self.patience = patience
@@ -303,23 +258,22 @@ def main():
     train_dataset = Dataset.from_list(raw_records)
     bf16 = _is_bfloat16_supported()
 
-    if env_url:
-        _primary = make_env_reward_fn(env_url)
-    else:
-        _primary = reward_brier
-
     _step_ref = [0]
-    logged_brier = wrap_with_logging(_primary, _step_ref)
+    logged_brier = wrap_with_logging(reward_brier, _step_ref)
 
     grpo_config = GRPOConfig(
         output_dir=OUTPUT_DIR,
         num_generations=16,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=16,
-        max_completion_length=512,
-        learning_rate=1.5e-6,
-        beta=0.1,
-        max_grad_norm=0.1,
+        
+        max_completion_length=2048,
+        temperature=1.0,
+        learning_rate=1.5e-6,             
+        
+        beta=0.04,
+        max_grad_norm=1.0,
+        
         scale_rewards=True,
         num_iterations=1,
         num_train_epochs=1,
@@ -332,12 +286,16 @@ def main():
         optim="adamw_8bit",
         report_to=report_to,
         seed=42,
+        
+        environment_factory=lambda: HonestEnv(base_url=env_url).sync() if env_url else None,
         **({  "max_steps": args.max_steps} if args.max_steps else {}),
     )
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[logged_brier, reward_format, reward_accuracy, reward_anti_hedge],
+        # The environment_factory handles the core Brier score reward natively from the server.
+        # `reward_format` acts as a local auxiliary penalty to strictly enforce XML structure.
+        reward_funcs=[reward_format] if env_url else [logged_brier, reward_format],
         args=grpo_config,
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -349,7 +307,7 @@ def main():
     log.info(f"Backend: {'Unsloth' if UNSLOTH_AVAILABLE else 'HF transformers'}")
     log.info(f"GPU:     {torch.cuda.get_device_name(0)} | bf16 supported: {bf16}")
     log.info(f"Reward:  {'live @ ' + env_url if env_url else 'local multi-reward'}")
-    log.info("KL beta: 0.1  |  max_grad_norm: 0.1  |  lr: 1.5e-6")
+    log.info("KL beta: 0.005  |  max_grad_norm: 1.0  |  lr: 1.5e-6  |  temp: 1.0")
     log.info("=" * 60)
 
     t0 = time.time()

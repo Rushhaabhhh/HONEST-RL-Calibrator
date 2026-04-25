@@ -7,8 +7,8 @@ from typing import Any, Optional
 
 from models.models import HonestAction, HonestObservation, HonestState
 from openenv.core.env_server.interfaces import Environment
-from data.sampler.unified_sampler import generate_code, generate_logic, generate_math
 from server.difficulty import update_difficulty
+from server.generators import code_gen, logic_gen, math_gen
 from server.reward import compute_reward, parse_action
 
 logger = logging.getLogger(__name__)
@@ -34,13 +34,12 @@ class HonestEnvironment(Environment):
         super().__init__(**kwargs)
         self._state: HonestState = HonestState(episode_id="")
         self._generators = {
-            "math": generate_math,
-            "code": generate_code,
-            "logic": generate_logic,
+            "math": math_gen.generate,
+            "code": code_gen.generate,
+            "logic": logic_gen.generate,
         }
         self._current_question: Optional[str] = None
         self._current_answer: Optional[str] = None
-        self._current_problem_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # reset
@@ -67,10 +66,9 @@ class HonestEnvironment(Environment):
         self._state.current_domain = domain
 
         difficulty = self._state.domain_difficulties[domain]
-        question, answer, problem_id = self._generators[domain](difficulty, seed=seed)
+        question, answer = self._generators[domain](difficulty, seed=seed)
         self._current_question = question
         self._current_answer = answer
-        self._current_problem_id = problem_id
 
         logger.info(
             "reset: episode_id=%s domain=%s difficulty=%d",
@@ -88,9 +86,7 @@ class HonestEnvironment(Environment):
             reward=None,
         )
 
-    # ------------------------------------------------------------------
-    # step
-    # ------------------------------------------------------------------
+    # In server/environment.py -> step()
 
     def step(
         self,
@@ -103,13 +99,41 @@ class HonestEnvironment(Environment):
         difficulty = self._state.domain_difficulties[domain]
 
         parsed = parse_action(action.raw_text)
-        reward_value, correctness = compute_reward(
-            parsed,
-            self._current_answer,
-            difficulty,
-            problem_id=self._current_problem_id,
-            domain=domain,
-        )
+        
+        # Handle <request_hint/>
+        if parsed.get("type") == "hint":
+            reward_value = -0.05  # The cost of information
+            correctness = None
+            self._state.hints_revealed += 1
+            
+            # Append a generic hint (in a v2, generators could provide domain-specific hints)
+            self._current_question += f"\n\n[System Hint {self._state.hints_revealed}: Review your assumptions. Break the problem down into smaller discrete steps.]"
+            
+            self._state.episode_step += 1
+            terminal = self._state.episode_step >= EPISODE_LENGTH
+            
+            # Record action in history
+            self._state.episode_history.append({
+                "action": "requested_hint",
+                "reward": reward_value,
+                "domain": domain,
+                "difficulty": difficulty,
+            })
+            
+            # Return observation BUT stay on the current problem
+            return HonestObservation(
+                question=self._current_question,
+                domain=domain,
+                difficulty=difficulty,
+                episode_step=self._state.episode_step,
+                previous_correctness=None,
+                terminal=terminal,
+                done=terminal,
+                reward=reward_value,
+            )
+
+        # STANDARD MDP LOGIC: Handle <answer> or <abstain>
+        reward_value, correctness = compute_reward(parsed, self._current_answer, difficulty)
 
         # Record episode history
         self._state.episode_history.append(
@@ -121,6 +145,7 @@ class HonestEnvironment(Environment):
                 "reward": reward_value,
                 "domain": domain,
                 "difficulty": difficulty,
+                "hints_used": self._state.hints_revealed
             }
         )
 
@@ -156,10 +181,11 @@ class HonestEnvironment(Environment):
         next_domain = random.choice(DOMAINS)
         self._state.current_domain = next_domain
         next_difficulty = self._state.domain_difficulties[next_domain]
-        next_question, next_answer, next_problem_id = self._generators[next_domain](next_difficulty)
+        next_question, next_answer = self._generators[next_domain](next_difficulty)
+        
         self._current_question = next_question
         self._current_answer = next_answer
-        self._current_problem_id = next_problem_id
+        self._state.hints_revealed = 0 # Reset hints for the new problem
 
         return HonestObservation(
             question=next_question,
@@ -172,10 +198,7 @@ class HonestEnvironment(Environment):
             reward=reward_value,
         )
 
-    # ------------------------------------------------------------------
     # state property
-    # ------------------------------------------------------------------
-
     @property
     def state(self) -> HonestState:
         return self._state

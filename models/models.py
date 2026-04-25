@@ -25,3 +25,4 @@ class HonestState(State):
     domain_difficulties: Dict[str, int] = Field(default_factory=dict)
     episode_step: int = 0
     episode_history: List[Any] = Field(default_factory=list)
+    hints_revealed: int = 0
