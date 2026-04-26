@@ -514,7 +514,13 @@ def _is_bfloat16_supported():
     return torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
 
-def load_model_unsloth(hf_token, model_id: str, lora_r: int = 16, lora_alpha: int = 32):
+def load_model_unsloth(
+    hf_token,
+    model_id: str,
+    lora_r: int = 16,
+    lora_alpha: int = 32,
+    init_adapter: Optional[str] = None,
+):
     log.info(f"Loading {model_id} via Unsloth (4-bit) | LoRA r={lora_r} α={lora_alpha}...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_id,
@@ -530,21 +536,39 @@ def load_model_unsloth(hf_token, model_id: str, lora_r: int = 16, lora_alpha: in
         tokenizer = get_chat_template(tokenizer, chat_template="qwen-2.5")
     tokenizer.padding_side = "left"
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_r,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=lora_alpha,
-        lora_dropout=0,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=42,
-    )
+    if init_adapter is not None:
+        # Warm-start from a previously trained LoRA adapter (typically an SFT
+        # warmup from training/calibration_sft.py). We attach the saved adapter
+        # via PEFT and let GRPO continue training the same matrices — no
+        # fresh randomly-initialised LoRA is created. This preserves the
+        # SFT-taught format prior + hindsight-tag prior into the GRPO phase.
+        from peft import PeftModel
+        log.info("Warm-starting LoRA from %s (Unsloth path).", init_adapter)
+        model = PeftModel.from_pretrained(
+            model, init_adapter, is_trainable=True,
+        )
+    else:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_r,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+            lora_alpha=lora_alpha,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=42,
+        )
     return model, tokenizer
 
 
-def load_model_standard(hf_token, model_id: str, lora_r: int = 16, lora_alpha: int = 32):
+def load_model_standard(
+    hf_token,
+    model_id: str,
+    lora_r: int = 16,
+    lora_alpha: int = 32,
+    init_adapter: Optional[str] = None,
+):
     log.info(f"Loading {model_id} via HF transformers (4-bit bnb) | LoRA r={lora_r} α={lora_alpha}...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -567,17 +591,25 @@ def load_model_standard(hf_token, model_id: str, lora_r: int = 16, lora_alpha: i
         token=hf_token,
     )
 
-    lora_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.0,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    if init_adapter is not None:
+        from peft import PeftModel
+        log.info("Warm-starting LoRA from %s (HF path).", init_adapter)
+        model = PeftModel.from_pretrained(
+            model, init_adapter, is_trainable=True,
+        )
+        model.print_trainable_parameters()
+    else:
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.0,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
     return model, tokenizer
 
 
@@ -833,6 +865,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output-dir", type=str, default=None,
                    help="Output directory. Defaults to ./honest-{model-slug}-grpo")
+    p.add_argument(
+        "--init-adapter",
+        type=str,
+        default=None,
+        help=(
+            "Path to a previously-trained LoRA adapter (e.g. from "
+            "training/calibration_sft.py) to warm-start GRPO from. "
+            "STRONGLY RECOMMENDED for tiny tier (qwen0.5b / llama1b) — "
+            "without it, ~98%% of early rollouts are malformed and the "
+            "GRPO advantage signal collapses to zero. See "
+            "docs/SELF_LEARNING.md §2.6 for the SFT-then-GRPO recipe."
+        ),
+    )
 
     # ─ Data ──────────────────────────────────────────────────────────────
     p.add_argument("--prompt-dataset-size", type=int, default=None,
@@ -1176,6 +1221,7 @@ def main():
               f"hindsight={args.hindsight}(mode={args.hindsight_mode}) "
               f"replay={args.replay_priority} "
               f"smc={args.self_mutate} self_play={args.self_play}")
+        print(f"  init_adapter:                {args.init_adapter or '(none — fresh LoRA)'}")
         return
 
     if not torch.cuda.is_available():
@@ -1189,15 +1235,42 @@ def main():
     # Load curated data once, up front, so failure mode is loud and immediate.
     _warm_up_unified_sampler()
 
+    # Tier-aware safety check: tiny tier without an init adapter is the
+    # documented failure mode (frac_zero_std ≈ 1.0 for the entire run). We
+    # warn loudly but do not block — research users may legitimately want
+    # to reproduce the failure as a baseline.
+    from calibration_profiles import is_tiny_tier as _is_tiny_tier
+    if args.init_adapter is None and _is_tiny_tier(preset.name):
+        log.warning(
+            "=" * 60
+        )
+        log.warning(
+            "Tier='tiny' (preset=%s) WITHOUT --init-adapter detected.",
+            preset.name,
+        )
+        log.warning(
+            "This model cannot reliably emit the 3-tag XML format from "
+            "the system prompt alone — expect ~97%% malformed rollouts "
+            "and frac_reward_zero_std ≈ 1.0 for the entire run.",
+        )
+        log.warning(
+            "Recommended: run training/calibration_sft.py first and pass "
+            "its output dir to --init-adapter. See docs/SELF_LEARNING.md "
+            "§2.6 for the SFT-then-GRPO recipe.",
+        )
+        log.warning("=" * 60)
+
     if UNSLOTH_AVAILABLE:
         model, tokenizer = load_model_unsloth(
             hf_token, args.model_id,
             lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+            init_adapter=args.init_adapter,
         )
     else:
         model, tokenizer = load_model_standard(
             hf_token, args.model_id,
             lora_r=args.lora_r, lora_alpha=args.lora_alpha,
+            init_adapter=args.init_adapter,
         )
 
     # The same controller instance is shared between (a) the lazy dataset's
@@ -1317,6 +1390,7 @@ def main():
 
     log.info("=" * 60)
     log.info(f"Model:   {args.model_id}")
+    log.info(f"Init:    {args.init_adapter or '(fresh LoRA)'}")
     log.info(f"Backend: {'Unsloth' if UNSLOTH_AVAILABLE else 'HF transformers'}")
     log.info(f"GPU:     {torch.cuda.get_device_name(0)} | bf16 supported: {bf16}")
     log.info(f"Reward:  brier_with_feedback + format×{preset.reward_format_weight} + "

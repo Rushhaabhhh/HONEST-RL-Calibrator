@@ -86,6 +86,38 @@ class CalibrationPreset:
     # at MIN_DIFFICULTY without ever exploring the easy band's calibration.
     default_initial_target: int
 
+    # --- Capability tier + SFT warmup recommendations ---------------------
+    # ``tier`` classifies the base model's reasoning capability. It controls
+    # whether the GRPO phase needs a prior format/calibration SFT pass to
+    # generate any signal at all.
+    #
+    #   "tiny"   (≤1B params)  Cannot reliably emit the 3-tag XML contract
+    #                          from a system prompt; needs SFT to bootstrap
+    #                          format AND a correctness-conditioned
+    #                          confidence prior. Without SFT, frac_zero_std
+    #                          ~ 1.0 in early GRPO steps and the run wastes
+    #                          compute on the malformed-penalty floor.
+    #   "small"  (1.5B-3B)     Format compliance reaches ~90 % within
+    #                          ~30 GRPO steps; SFT is *helpful* (10-20 %
+    #                          faster convergence) but not strictly
+    #                          required. SFT is also the only way to
+    #                          activate the legacy <hindsight> head on
+    #                          these sizes — the base model has zero
+    #                          prior on that tag.
+    #   "medium" (3B-4B)       Robust format compliance from the system
+    #                          prompt; SFT is mostly useful for activating
+    #                          hindsight or boosting the early-step
+    #                          calibration prior.
+    #
+    # The SFT recommendations below feed into ``training/calibration_sft.py``
+    # so a single ``--model-preset`` selection picks tier-appropriate
+    # warmup hyperparameters and data composition.
+    tier: str
+    recommended_sft_examples: int
+    recommended_sft_epochs: int
+    recommended_sft_max_difficulty: int
+    recommended_sft_hindsight_frac: float
+
 
 MODEL_PRESETS: Dict[str, CalibrationPreset] = {
     # ─────────────────────────────────────────────────────────────────────
@@ -121,6 +153,18 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.02,
         kl_relax_frac=0.50,
         default_initial_target=1,
+        # SFT warmup is REQUIRED on this tier — without it, ~98 % of GRPO
+        # rollouts hit the malformed penalty floor (verified empirically
+        # on the 2026-04-25 run). 1500 examples × 2 epochs ≈ 750 SFT
+        # steps at bs=2, ga=4 (≈ effective batch 8) ≈ 8 minutes on A100.
+        # Hindsight fraction 0.5 means half the SFT examples include a
+        # ground-truth-aligned <hindsight> tag, so the legacy hindsight
+        # reward channel actually fires when GRPO starts.
+        tier="tiny",
+        recommended_sft_examples=1500,
+        recommended_sft_epochs=2,
+        recommended_sft_max_difficulty=2,
+        recommended_sft_hindsight_frac=0.5,
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-1.5B-Instruct  →  T4 16 GB / L4 24 GB / A100 (fits in bf16
@@ -154,6 +198,15 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.02,
         kl_relax_frac=0.50,
         default_initial_target=1,
+        # SFT helpful but not strictly required — Qwen-1.5B reaches ~90 %
+        # format compliance from the system prompt within 30 GRPO steps.
+        # Including SFT activates the hindsight head and accelerates
+        # early Brier convergence by ~15 %.
+        tier="small",
+        recommended_sft_examples=1000,
+        recommended_sft_epochs=2,
+        recommended_sft_max_difficulty=3,
+        recommended_sft_hindsight_frac=0.4,
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-3B-Instruct  →  L4 24 GB (recommended) / A10G 24 GB
@@ -188,6 +241,11 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.015,
         kl_relax_frac=0.50,
         default_initial_target=2,
+        tier="medium",
+        recommended_sft_examples=600,
+        recommended_sft_epochs=1,
+        recommended_sft_max_difficulty=4,
+        recommended_sft_hindsight_frac=0.3,
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Llama-3.2-1B-Instruct  →  Colab T4 16 GB / L4 24 GB
@@ -223,6 +281,16 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.02,
         kl_relax_frac=0.55,
         default_initial_target=1,
+        # Tiny tier (cross-family). Llama-1B is even more format-fragile
+        # than Qwen-0.5B — its raw GRPO logs show malformed-floor for
+        # ~97 % of early rollouts. The same SFT recipe applies; we just
+        # over-weight code in the warmup mix (Llama series was distilled
+        # heavily on code) so the SFT loss sees a domain it can fit.
+        tier="tiny",
+        recommended_sft_examples=1500,
+        recommended_sft_epochs=2,
+        recommended_sft_max_difficulty=2,
+        recommended_sft_hindsight_frac=0.5,
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Llama-3.2-3B-Instruct  →  L4 24 GB
@@ -253,6 +321,11 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.015,
         kl_relax_frac=0.55,
         default_initial_target=1,
+        tier="medium",
+        recommended_sft_examples=700,
+        recommended_sft_epochs=1,
+        recommended_sft_max_difficulty=4,
+        recommended_sft_hindsight_frac=0.3,
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Phi-4-mini-instruct  →  L4 24 GB (sequential after Llama)
@@ -279,8 +352,51 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         beta_end=0.015,
         kl_relax_frac=0.50,
         default_initial_target=2,
+        tier="medium",
+        recommended_sft_examples=500,
+        recommended_sft_epochs=1,
+        recommended_sft_max_difficulty=4,
+        recommended_sft_hindsight_frac=0.3,
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Tier helpers — used by training/calibration_sft.py and by the SFT-then-GRPO
+# orchestrator (bin/run_calibration_pipeline.sh).
+# ---------------------------------------------------------------------------
+
+
+SUPPORTED_TIERS = ("tiny", "small", "medium")
+
+
+def is_tiny_tier(preset_name: str) -> bool:
+    """True iff the preset's tier is ``tiny``.
+
+    Use this in callers that need to decide whether to *require* the SFT
+    warmup phase (tiny models will spend the entire GRPO run on the
+    malformed-penalty floor without it) versus just *recommend* it.
+    """
+    if preset_name not in MODEL_PRESETS:
+        return False
+    return MODEL_PRESETS[preset_name].tier == "tiny"
+
+
+def recommend_hindsight_mode(preset_name: str) -> str:
+    """Tier-appropriate default for ``--hindsight-mode``.
+
+    The CASR (refined) protocol asks the model to *critique its own
+    reasoning*, which requires reasoning capacity tiny models simply
+    don't have. The SFT-teachable legacy ``<hindsight>`` tag is just a
+    self-prediction regression target — well within a 0.5B's capacity
+    once the format has been SFT'd.
+
+    Returns ``"legacy"`` for tiny tier, ``"refined"`` for small/medium.
+    Callers should still respect an explicit user override.
+    """
+    if preset_name not in MODEL_PRESETS:
+        return "refined"
+    return "legacy" if MODEL_PRESETS[preset_name].tier == "tiny" else "refined"
 
 
 def infer_preset_name(model_id: str) -> str:

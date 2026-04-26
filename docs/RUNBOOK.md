@@ -172,6 +172,49 @@ override per-run.
     --output-dir      ./honest-qwen-3b-grpo
 ```
 
+### 3a-bis · Tiny models (Qwen-0.5B, Llama-1B) — SFT first, GRPO second
+
+Tiny models cannot reliably emit the 3-tag XML format from the system
+prompt alone. Without a Calibration SFT warmup, ~97 % of GRPO rollouts
+hit the malformed-penalty floor and the GRPO advantage signal stays at
+zero. The provided one-command recipe handles both phases:
+
+```bash
+# Qwen-0.5B (Colab T4 friendly, ~10 min SFT + ~50 min GRPO on T4)
+./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-0.5B-Instruct
+
+# Llama-1B
+./bin/run_calibration_pipeline.sh meta-llama/Llama-3.2-1B-Instruct
+
+# Override anything by appending GRPO flags after the model id:
+./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-0.5B-Instruct \
+    --max-steps 200 --replay-priority --self-mutate
+```
+
+The script picks tier-aware defaults from `calibration_profiles.py`:
+1500 SFT examples × 2 epochs at max_difficulty=2 with hindsight tag
+on half the examples, followed by GRPO with `--init-adapter` pointing
+at the SFT output and `--hindsight-mode legacy` (the tractable head
+for tiny models).
+
+For deeper detail and what to expect from the metrics see
+[`docs/SELF_LEARNING.md` §2.6](SELF_LEARNING.md#26-bringing-tiny-models-on-line--calibration-sft-warmup).
+
+To reproduce the SFT phase manually (e.g. to swap in a different mix):
+
+```bash
+./venv/bin/python training/calibration_sft.py \
+    --model-id Qwen/Qwen2.5-0.5B-Instruct \
+    --output-dir ./sft-qwen-0.5b \
+    --n-examples 1500 --epochs 2 --hindsight-frac 0.5
+
+./venv/bin/python training/train_grpo.py \
+    --model-id Qwen/Qwen2.5-0.5B-Instruct \
+    --init-adapter ./sft-qwen-0.5b \
+    --hindsight --hindsight-mode legacy \
+    --max-steps 250 --output-dir ./honest-qwen-0-5b-grpo
+```
+
 ### 3b · GRPO + self-learning (recommended for the headline result)
 
 ```bash

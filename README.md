@@ -339,6 +339,24 @@ larger presets — absolute numbers are softer (final reward ≈ -0.85 vs
 demonstrate that the calibration RL pipeline generalizes across model
 scale.
 
+> **Tiny tier requires SFT first.** Qwen-0.5B and Llama-1B cannot reliably
+> emit the strict 3-tag XML format from the system prompt alone, so a
+> raw GRPO run on those sizes spends ~98 % of rollouts on the malformed
+> floor and the advantage signal is identically zero. Use the one-command
+> wrapper which chains a short Calibration-SFT phase into GRPO with
+> tier-appropriate hindsight settings:
+>
+> ```bash
+> ./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-0.5B-Instruct
+> ./bin/run_calibration_pipeline.sh meta-llama/Llama-3.2-1B-Instruct
+> ```
+>
+> The SFT phase teaches format compliance, a correctness-conditioned
+> confidence prior, and the legacy `<hindsight>` tag — so the legacy
+> hindsight reward channel actually fires when GRPO starts. See
+> [`docs/SELF_LEARNING.md` §2.6](docs/SELF_LEARNING.md#26-bringing-tiny-models-on-line--calibration-sft-warmup)
+> for the full design and what to expect from the metrics.
+
 Override per run via `--model-preset` and `--colab-profile {t4,l4,a100}`.
 The Colab profile installs hardware safety caps (clipping G,
 `max_completion_length`, `lora_r`, etc.) but never raises risky values.

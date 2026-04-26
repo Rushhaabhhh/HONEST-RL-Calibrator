@@ -238,6 +238,92 @@ On the legacy v1 run with `reasoning_mode=required`, this is ~100 % zero
 non-zero on most steps within ~50 GRPO steps of cold start (the format
 bonus drives initial emission of the new tags).
 
+### 2.6 Bringing tiny models on-line — Calibration SFT warmup
+
+The two hindsight modes above (legacy v1, refined CASR) both assume the
+base model can already emit the strict 3-tag XML format from the system
+prompt alone. Empirically that is true for Qwen-3B and larger; it is
+**catastrophically false** for Qwen-0.5B and Llama-1B. On those tiers,
+~97 % of GRPO rollouts hit the malformed-penalty floor in the first 100
+steps, `frac_reward_zero_std ≈ 1.0`, and the GRPO advantage signal is
+identically zero — the model never receives any calibration gradient.
+
+The fix is not subtle: a single short Calibration SFT pass before the RL
+phase, taught by `training/calibration_sft.py`. Each SFT example bundles
+three priors into a single assistant target:
+
+1. **Format compliance** — every target uses the exact 3-tag contract
+   (or `<abstain/>`) so the model sees the strict format thousands of
+   times before GRPO starts grading it.
+2. **Correctness-conditioned confidence prior** — when the SFT target's
+   answer is the actual ground truth the confidence is sampled from a
+   high-band (≈ 0.85 ± 0.10); when it has been deliberately perturbed
+   the confidence is sampled from a low-band (≈ 0.25 ± 0.15). The model
+   learns "wrong answer → low confidence" *before* GRPO ever shapes it.
+3. **Hindsight tag prior** — half of the examples include
+   `<hindsight>r</hindsight>` with `r` bound to the ground-truth
+   correctness of the displayed answer. This is precisely what
+   `server.hindsight.compute_hindsight_reward` grades, so once SFT runs
+   the legacy hindsight reward channel actually fires during GRPO
+   instead of staying at 0.0 forever.
+
+#### Tier-aware defaults
+
+`calibration_profiles.py` tags each preset with a `tier` (`tiny` /
+`small` / `medium`) and four SFT recommendations: `n_examples`,
+`epochs`, `max_difficulty`, `hindsight_frac`. The SFT script auto-resolves
+all four from `--model-id`:
+
+| Preset      | tier   | sft_n | epochs | max_d | hindsight_frac | recommended `--hindsight-mode` |
+|-------------|--------|-------|--------|-------|----------------|--------------------------------|
+| qwen0.5b    | tiny   | 1500  | 2      | 2     | 0.50           | legacy                         |
+| llama1b     | tiny   | 1500  | 2      | 2     | 0.50           | legacy                         |
+| qwen1.5b    | small  | 1000  | 2      | 3     | 0.40           | refined                        |
+| qwen3b      | medium | 600   | 1      | 4     | 0.30           | refined                        |
+| llama3b     | medium | 700   | 1      | 4     | 0.30           | refined                        |
+| phi4mini    | medium | 500   | 1      | 4     | 0.30           | refined                        |
+
+CASR is intentionally *not* recommended for tiny models — it asks the
+model to critique its own reasoning, which requires a generative
+capacity 0.5B / 1B simply does not have. Legacy hindsight is a tractable
+self-prediction regression target that fits comfortably inside a tiny
+LoRA once the SFT phase has taught the tag.
+
+#### One-command recipe
+
+```bash
+# Tiny models — SFT is REQUIRED.
+./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-0.5B-Instruct
+./bin/run_calibration_pipeline.sh meta-llama/Llama-3.2-1B-Instruct
+
+# Medium models — SFT optional but accelerates calibration.
+./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-3B-Instruct
+```
+
+The script chains:
+
+1. `python training/calibration_sft.py --model-id ... --output-dir ./sft-<slug>`
+2. `python training/train_grpo.py --model-id ... --init-adapter ./sft-<slug> --hindsight --hindsight-mode {legacy|refined}`
+
+Pass extra GRPO args after the model id; pass `--skip-sft` to skip the
+warmup phase entirely (only sensible on medium tier or when reproducing
+a baseline).
+
+#### What to look for in the run
+
+* The `--init-adapter` warmup increases initial format compliance from
+  ~0–3 % to ~85–95 % at GRPO step 0.
+* `frac_reward_zero_std` drops from ~1.0 (no signal) to ~0.2–0.4 within
+  the first 30 GRPO steps.
+* The legacy hindsight channel returns non-zero for the majority of
+  steps (verify with `bin/audit_hindsight.py`) — same diagnostic as for
+  the medium-tier CASR runs.
+* Brier reward visibly *moves*: for Qwen-0.5B, expect a trajectory from
+  ~ -1.2 → -0.8 over 250 steps; for Llama-1B, ~ -1.3 → -0.85. Absolute
+  numbers are softer than the 3B presets but the *shape* of the curve
+  finally exists, which is the whole point of demonstrating calibration
+  on small models.
+
 ---
 
 ## 3. Pillar 2 — Calibration-Prioritized Replay (CPR)
