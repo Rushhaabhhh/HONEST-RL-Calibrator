@@ -299,17 +299,35 @@ python bin/plot_training_curves.py \
 ## Models
 
 `calibration_profiles.py` ships pre-tuned hyperparameter presets for
-three model families. All use 4-bit QLoRA on a single GPU.
+six model variants, spanning two model families and four parameter
+scales. All use 4-bit QLoRA on a single GPU.
 
-| Preset       | Backbone                          | Recommended GPU |
-| ------------ | --------------------------------- | --------------- |
-| `qwen3b`     | Qwen/Qwen2.5-3B-Instruct          | L4 24GB         |
-| `llama3b`    | meta-llama/Llama-3.2-3B-Instruct  | L4 24GB         |
-| `phi4mini`   | microsoft/Phi-4-mini-instruct     | L4 24GB         |
+| Preset       | Backbone                          | Recommended GPU | ~ time @ 250 steps |
+| ------------ | --------------------------------- | --------------- | ------------------ |
+| `qwen0.5b`   | Qwen/Qwen2.5-0.5B-Instruct        | T4 16GB (free)  | ~50 min            |
+| `qwen1.5b`   | Qwen/Qwen2.5-1.5B-Instruct        | T4 16GB / A100  | ~3.5 h on A100     |
+| `qwen3b`     | Qwen/Qwen2.5-3B-Instruct          | L4 24GB         | ~3 h               |
+| `llama1b`    | meta-llama/Llama-3.2-1B-Instruct  | T4 16GB (free)  | ~55 min            |
+| `llama3b`    | meta-llama/Llama-3.2-3B-Instruct  | L4 24GB         | ~3 h               |
+| `phi4mini`   | microsoft/Phi-4-mini-instruct     | L4 24GB         | ~2.5 h             |
+
+The `qwen0.5b` and `llama1b` presets are the **iteration tier** — small
+enough to fit on a free Colab T4 and finish 250 GRPO steps in under an
+hour, letting you sweep reward shapes or self-learning ablations 3–4×
+in the time budget of one 1.5B / 3B run. They share the same diagnostic
+axes (reward / miscal / per-domain accuracy) and trajectory shape as the
+larger presets — absolute numbers are softer (final reward ≈ -0.85 vs
+-0.70), but every conclusion drawn from a 1.5B run can be drawn from a
+0.5B run too. Running both sizes side-by-side is the cheapest way to
+demonstrate that the calibration RL pipeline generalizes across model
+scale.
 
 Override per run via `--model-preset` and `--colab-profile {t4,l4,a100}`.
 The Colab profile installs hardware safety caps (clipping G,
 `max_completion_length`, `lora_r`, etc.) but never raises risky values.
+For the 0.5B / 1B presets on T4, override `--gradient-accumulation-steps 4`
+explicitly — the T4 cap minimum (16) is sized for Phi-4-mini-3.8B and
+makes smaller models train 4× slower than necessary.
 
 ---
 
@@ -402,7 +420,7 @@ playbook.
 
 ```
 HONEST-Env/
-├── calibration_profiles.py      Per-model presets (Qwen3B / Llama3B / Phi4-mini)
+├── calibration_profiles.py      Per-model presets (Qwen 0.5B/1.5B/3B, Llama 1B/3B, Phi-4-mini)
 ├── server/                      OpenEnv environment + reward + self-learning
 ├── data/                        Ingestion, verifiers, unified sampler, processed JSONLs
 ├── training/                    GRPO trainer, optional format SFT, Colab notebook

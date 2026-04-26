@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
-SUPPORTED_PRESETS = ("qwen1.5b", "qwen3b", "llama3b", "phi4mini")
+SUPPORTED_PRESETS = ("qwen0.5b", "qwen1.5b", "qwen3b", "llama1b", "llama3b", "phi4mini")
 REASONING_MODES = ("required",)
 
 
@@ -83,6 +83,40 @@ class CalibrationPreset:
 
 MODEL_PRESETS: Dict[str, CalibrationPreset] = {
     # ─────────────────────────────────────────────────────────────────────
+    # Qwen2.5-0.5B-Instruct  →  Colab T4 16 GB (free tier) — fastest iteration
+    # Tier. ~10-13 s/step on T4 with G=4, max_len=256, ga=4 → 250 steps in
+    # ~50 minutes. Smaller capacity means absolute reward/miscal numbers
+    # are softer than 1.5B (final reward ~ -0.85 vs -0.70, miscal ~ 0.75
+    # vs 0.60), but the trajectory shape is identical: reward climbs,
+    # miscal drops, accuracy rises. Ideal for reward-shape sweeps and
+    # ablations (hindsight on/off, replay on/off) where you want 3-4
+    # runs in the time budget of a single 1.5B run. lr lifted to 4e-6
+    # because the smaller policy tolerates steeper updates and noisier
+    # rollouts need a bigger gradient. G=4 is small but the GRPO
+    # advantage is still well-conditioned (group std stays > 0.1
+    # within ~5 steps). Difficulty mixture leans heavily toward d=1-2
+    # (0.45 + 0.35) since 0.5B reliably solves only the easy band.
+    # ─────────────────────────────────────────────────────────────────────
+    "qwen0.5b": CalibrationPreset(
+        name="qwen0.5b",
+        model_hint="Qwen/Qwen2.5-0.5B-Instruct",
+        domain_weights={"math": 0.50, "code": 0.30, "logic": 0.20},
+        difficulty_weights={1: 0.45, 2: 0.35, 3: 0.15, 4: 0.04, 5: 0.01},
+        default_prompt_dataset_size=1500,
+        default_num_generations=4,
+        default_max_completion_length=256,
+        default_temperature=0.85,
+        default_learning_rate=4.0e-6,
+        default_beta=0.05,
+        default_lora_r=16,
+        default_max_steps=250,
+        reward_format_weight=1.0,
+        reward_accuracy_weight=1.0,
+        beta_end=0.02,
+        kl_relax_frac=0.50,
+        default_initial_target=1,
+    ),
+    # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-1.5B-Instruct  →  T4 16 GB / L4 24 GB / A100 (fits in bf16
     # without quantization). Iteration-tier preset: ~50 min for 250 steps
     # on A100 80 GB, lets the operator run 3-4 reward-shape sweeps in the
@@ -150,6 +184,41 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         default_initial_target=2,
     ),
     # ─────────────────────────────────────────────────────────────────────
+    # Llama-3.2-1B-Instruct  →  Colab T4 16 GB / L4 24 GB
+    # Cross-family iteration tier. Llama-1B reasoning is strong on code
+    # (Llama series was distilled on coding heavily) but weaker on math at
+    # this scale than Qwen-1.5B. Format compliance lags Qwen's: the
+    # model occasionally emits XML before its closing tag, so we lift
+    # reward_format_weight to 1.5 to anchor structure during the early
+    # exploration phase. Temperature 0.9 (vs Qwen's 0.85) because Llama-1B
+    # samples are tighter at lower temps and we need group diversity for
+    # the GRPO advantage signal. lr=2e-6 conservative — Llama at this
+    # scale format-collapses under aggressive lr (same failure mode as
+    # the 3B preset, manifested earlier). Difficulty mixture mirrors
+    # Qwen-0.5B (lots of d=1-2) since 1B Llama solves d=4-5 too rarely
+    # to provide useful calibration gradient. Initial target=1 keeps
+    # the controller out of the noise floor at d=2.
+    # ─────────────────────────────────────────────────────────────────────
+    "llama1b": CalibrationPreset(
+        name="llama1b",
+        model_hint="meta-llama/Llama-3.2-1B-Instruct",
+        domain_weights={"math": 0.40, "code": 0.40, "logic": 0.20},
+        difficulty_weights={1: 0.40, 2: 0.35, 3: 0.18, 4: 0.05, 5: 0.02},
+        default_prompt_dataset_size=2000,
+        default_num_generations=4,
+        default_max_completion_length=256,
+        default_temperature=0.90,
+        default_learning_rate=2.0e-6,
+        default_beta=0.05,
+        default_lora_r=16,
+        default_max_steps=250,
+        reward_format_weight=1.5,
+        reward_accuracy_weight=1.0,
+        beta_end=0.02,
+        kl_relax_frac=0.55,
+        default_initial_target=1,
+    ),
+    # ─────────────────────────────────────────────────────────────────────
     # Llama-3.2-3B-Instruct  →  L4 24 GB
     # Weaker reasoning (~45 % on diff-2) and noisier rollouts. We bump G to
     # 10 and use temp=0.9 for exploration, but keep lr=1e-6 conservative
@@ -211,10 +280,14 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
 def infer_preset_name(model_id: str) -> str:
     """Infer preset from model id; defaults to qwen3b for unknown ids."""
     m = (model_id or "").lower()
+    if "qwen" in m and ("0.5b" in m or "0_5b" in m):
+        return "qwen0.5b"
     if "qwen" in m and ("1.5b" in m or "1_5b" in m):
         return "qwen1.5b"
     if "qwen" in m and "3b" in m:
         return "qwen3b"
+    if "llama" in m and "1b" in m:
+        return "llama1b"
     if "llama" in m and "3b" in m:
         return "llama3b"
     if "phi-4-mini" in m or ("phi" in m and "mini" in m):
