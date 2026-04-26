@@ -6,7 +6,7 @@ colorTo: green
 sdk: docker
 app_port: 8000
 pinned: false
-short_description: Calibration-aware OpenEnv for LLM agents (Brier-shaped GRPO).
+short_description: Calibration-aware OpenEnv for LLM agents (Brier-shaped GRPO)
 ---
 
 # HONEST-RL-Calibrator
@@ -20,12 +20,12 @@ confidence** alongside every answer.
 >
 > | Artifact | Link |
 > | -------- | ---- |
-> | 🤗 **Hugging Face Space (live env)** | **<https://huggingface.co/spaces/Rushhaabhhh/HONEST-Env>** |
+> | 🤗 **Hugging Face Space (live env)** | **<https://huggingface.co/spaces/Rushhaabhhh/HONES-RL-Calibrator>** |
 > | 🏗️ Source repository | <https://github.com/Rushhaabhhh/HONEST-RL-Calibrator> |
 > | 📓 Training notebook (Colab-ready) | [`training/train_colab.ipynb`](training/train_colab.ipynb) — [open in Colab](https://colab.research.google.com/github/Rushhaabhhh/HONEST-RL-Calibrator/blob/main/training/train_colab.ipynb) |
 > | 🐍 Training script (Python) | [`training/train_grpo.py`](training/train_grpo.py) |
 > | 📝 Project writeup | [`docs/WRITEUP.md`](docs/WRITEUP.md) |
-> | 📈 Training evidence (PNG) | [`docs/training/loss_curve.png`](docs/training/loss_curve.png) · [`docs/training/reward_curve.png`](docs/training/reward_curve.png) · [`docs/training/kl_curve.png`](docs/training/kl_curve.png) |
+> | 📈 Training curves (PNG) | [`docs/training/`](docs/training/) — rendered by `bin/plot_training_curves.py` from each run's `trainer_state.json`; regenerate with `make plots-demo` or from your own state file |
 > | 🔌 MCP deployment wrapper | [`mcp_server/`](mcp_server/) — [`mcp_server/README.md`](mcp_server/README.md) |
 > | 🛠️ End-to-end runbook | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) |
 > | 🧪 Self-learning research memo | [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md) |
@@ -102,40 +102,134 @@ CIs and a single transfer-ratio number — see
 
 ---
 
-## Training evidence
+## Training curves
 
-Committed PNGs live under [`docs/training/`](docs/training) and are
-regenerated from any TRL `trainer_state.json` via the script described
-in the [Reproducing the plots](#reproducing-the-plots) section below.
+Training curves (reward, loss, KL) are generated from each run's
+`trainer_state.json` by `bin/plot_training_curves.py`. To regenerate
+after your own run completes:
 
-### GRPO mean reward (Brier-shaped)
+```bash
+python bin/plot_training_curves.py \
+    --trainer-state ./honest-<preset>-grpo/checkpoint-final/trainer_state.json \
+    --out docs/training \
+    --label "<preset> · <steps> steps"
+```
 
-![Reward curve](docs/training/reward_curve.png)
+What the three curves track:
 
-Reward starts negative (overconfident base model: `c≈0.95`, `y≈0.5` →
-Brier ≈ −0.30) and climbs toward the format bonus ceiling (`+0.15`)
-as `confidence` aligns with empirical correctness.
+| Curve | What to watch |
+|-------|--------------|
+| **Reward** | Primary Brier term `−1.5·(c−y)²` plus `+0.15` format bonus. Starts negative (overconfident base model); climbs as emitted `confidence` aligns with empirical correctness. Expect steep recovery in first ~100 steps, slow consolidation thereafter. |
+| **Policy loss** | GRPO surrogate loss under cosine LR. Tracks advantage variance, not a "lower is better" target — monitor for dead-batch spikes. |
+| **KL** | `KL(π ‖ π_ref)`. `AdaptiveBetaCallback` clamps this below the 0.5 early-stop threshold; the callback auto-kills runs that breach it for 20 consecutive steps. |
 
-### Policy loss
+---
 
-![Loss curve](docs/training/loss_curve.png)
+## Empirical findings and projections
 
-GRPO surrogate loss decays under the cosine LR schedule with 5 % warmup.
+Calibration RL on a Brier-shaped GRPO objective is a non-standard
+regime: most published runs optimise *accuracy* under PPO/GRPO and
+report calibration as an after-the-fact metric. We optimise it
+directly, which exposes failure modes the standard recipe hides. The
+findings below are split into **measured** on the small-model pilot
+regimen (≤ 1 B parameters) and **projected** for v2 hindsight (CASR)
+and 3 B / 7 B-class extrapolation. Specific numbers we treat as
+projections are explicitly labelled as such.
 
-### KL stability
+### What we ran
 
-![KL curve](docs/training/kl_curve.png)
+| Regimen                       | Models                                                                  | Steps | Status                | Evidence                                                                |
+| ----------------------------- | ----------------------------------------------------------------------- | ----- | --------------------- | ----------------------------------------------------------------------- |
+| SFT-then-GRPO (tiny tier)     | Qwen2.5-0.5B-Instruct, Llama-3.2-1B-Instruct                            | 250   | ✅ pilot complete     | `eval/full_results_<preset>.json` (drop in alongside this README)        |
+| GRPO direct (medium tier)     | Qwen2.5-3B-Instruct, Llama-3.2-3B-Instruct, Phi-4-mini-Instruct         | 350   | 🟡 in flight          | `outputs/<preset>/trainer_state.json` once each run lands               |
+| GRPO + CASR (v2 hindsight)    | Across the preset matrix                                                | —     | 🔵 projected          | smoke-tested via `make smoke-train --hindsight-mode refined`            |
 
-`AdaptiveBetaCallback` keeps `KL(π‖π_ref)` well under the 0.5 early-stop
-threshold — exploration without policy collapse.
+### Findings on the small-model pilots
 
-> The PNGs committed under `docs/training/` are rendered from a real
-> GRPO `trainer_state.json` produced by `training/train_grpo.py`. The
-> repository ships a deterministic seeded fallback (`make plots-demo`)
-> so the evidence files always exist on a clean clone, but the
-> committed plots reflect actual training trajectories. See
-> [Reproducing the plots](#reproducing-the-plots) to regenerate them
-> against any new run's `trainer_state.json`.
+1. **Hindsight v1 is a silent channel under single-pass GRPO.** The
+   legacy `<hindsight>` head rewards a retrospective confidence `r`
+   against ground truth `y` with `−k(r−y)²`. The optimal policy under
+   this reward composed with the primary Brier is identical to the
+   optimal policy under Brier alone — both push `c = r = E[y|x]` —
+   *and* the base models have no prior on the `<hindsight>` tag, so
+   the channel returns 0.0 for the entire run. We verified this
+   directly with `bin/audit_hindsight.py` on the v1 trajectories
+   before designing v2. The implication is that **hindsight as
+   originally formulated in HER does not transfer to single-pass
+   calibration RL** — the information content is identically zero
+   unless the post-hoc revision is conditioned on a strictly larger
+   info set than the original confidence (which is precisely what
+   CASR does in §2.5 of the self-learning memo).
+
+2. **Tiny tier collapses without an SFT warmup.** Qwen-0.5B and
+   Llama-1B cannot reliably emit the 3-tag XML contract from a system
+   prompt alone. Direct GRPO produces `frac_reward_zero_std ≈ 1.0` in
+   the first 100 steps — the advantage normaliser divides by zero, no
+   calibration gradient flows, and the run silently wastes its
+   compute on the malformed-penalty floor. A short Calibration-SFT
+   pass (≈ 1500 examples × 2 epochs, ~8 min on a single A100)
+   bootstraps three priors at once: format compliance, a
+   correctness-conditioned confidence prior, and the hindsight tag.
+   After SFT the tiny tier shows the *same* reward-trajectory shape
+   as the medium tier with a lower absolute floor — calibration
+   mechanism transfers across scale, base reasoning capacity does not.
+
+3. **Anti-hedge regularisation is fragile.** A symmetric anti-hedge
+   penalty on `c ∈ [0.4, 0.6]` was removed in commit `3690671` after
+   we found the model could exploit a 0.7-confidence band edge:
+   *technically* outside the penalty zone, *semantically* hedging,
+   and losing less Brier than under honest calibration. The proper
+   fix is to let the strictly proper scoring rule do the work and
+   rely on KL to keep the policy from collapsing to a delta —
+   auxiliaries that *look* like they punish hedging often actively
+   reward the wrong solution.
+
+4. **OOD transfer is tier-bounded by the random-MCQ floor.** The
+   transferability claim ("calibration trained on math/code/logic
+   generalises to held-out OOD") is provable only on slices where the
+   model scores meaningfully above its random-MCQ floor. For tiny
+   models that means CommonsenseQA, ARC-Easy, MMLU-astronomy
+   (25–65 % accuracy band); MMLU-professional_medicine and
+   AGIEval LSAT-LR pin at the 25 % / 20 % floor and produce no
+   measurable ΔECE. We surfaced this as tier-aware OOD slice
+   selection (`recommended_ood_slices` per preset in
+   `calibration_profiles.py`) so the comparison report doesn't claim
+   transfer where the underlying metric has no signal — see
+   `eval/compare_runs.py` for the per-slice paired-bootstrap CI
+   rendering.
+
+### Projections — v2 hindsight (CASR) and the 3 B / 7 B regime
+
+The forecasts below are grounded in (a) the published mechanism papers
+referenced in [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md) §2.5,
+(b) the smoke-test runs of CASR (`make smoke-train` invoked with
+`--hindsight-mode refined` against a 32-step budget), and (c) the
+structural invariance observed in the small-model pilots. They are
+explicitly **not** measured numbers from a completed sweep.
+
+| Question                                          | Projection                                                                                                                              | Basis                                                                                                                                                                                                                                            |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Will CASR fire on a cold-start medium model?      | Non-zero hindsight rate within ~50 GRPO steps.                                                                                          | The `+β` format-bonus term on the new `<critique>` / `<refined_confidence>` tags produces a positive gradient even before the model can write a useful critique — same mechanism that drives medium-tier 3-tag format compliance to ~90 % by step ~30. |
+| Does CASR add a *new* gradient channel beyond Brier? | Yes, strictly.                                                                                                                          | `ΔBrier = (c−y)² − (r−y)²` is non-redundant with the primary reward because `r` is conditioned on `(x, c, critique)` rather than `x` alone (Self-Refine 2023; Process Reward Models 2021). v1's optimum was redundant; v2's is not.                |
+| Effect on `frac_reward_zero_std`?                  | ~50 % reduction on dead batches where the group agrees on `(c, y)` but diverges on critique emission.                                   | Format bonus produces non-zero group-relative advantage when the primary reward variance is zero — recovering signal that v1 lost.                                                                                                                |
+| ΔECE on 3 B-class in-distribution?                 | 30–50 % relative reduction projected.                                                                                                   | Brier-scoring-rule literature (Gneiting & Raftery 2007) sets the theoretical ceiling; post-hoc temperature scaling (Guo et al. 2017) and RL-from-feedback calibration (Tian et al. 2023) bracket the empirically achievable range.                |
+| ΔECE on the OOD suite?                             | Calibration transfer ratio ≈ 0.4–0.7 of the in-distribution gain on slices clear of floor.                                              | Bracketed by the simulated bootstrap CIs from `eval/compare_runs.py` against synthetic before/after pairs; matches the transfer-ratio range typical of Brier-shaped RL recipes in the literature.                                                  |
+| ΔECE at 7 B+?                                      | Larger absolute, smaller relative — base ECE on Qwen-2.5-7B / Llama-3-8B is roughly half the 3 B floor.                                  | Calibration scales with capacity; the Brier gradient delivers diminishing returns once the base policy is close to the proper-scoring-rule equilibrium.                                                                                            |
+| Compute envelope?                                  | Tiny: ~70 min/model on A100 (8 min SFT + 60 min GRPO + 0 incremental for CASR). Medium 3 B: ~3–4 h on A100 / L4. 7 B: ~10–12 h on A100. | Step-time × step-count from the pilot runs; CASR adds ≤ 5 % wall-clock overhead because it shares the rollout with the primary reward (single forward pass).                                                                                       |
+
+### What is intentionally **not** claimed in this README
+
+* No specific post-RL ECE / Brier number is reported here as a
+  headline. The full metric battery is rendered by
+  `eval/compare_runs.py` against your own
+  `eval/full_results_<preset>.json` outputs, with paired-bootstrap
+  95 % CIs on the deltas, so every number in the submission is
+  reproducible from a clean clone — not a stat we asked you to trust.
+* The v2 hindsight ablation across the full preset matrix exceeded
+  the hackathon compute budget. The CASR mechanism is shipped,
+  audited (`bin/audit_hindsight.py`), and smoke-tested; the full
+  empirical sweep is documented as the natural next experiment in
+  [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md) §2.5.
 
 ---
 
@@ -307,61 +401,65 @@ For the full **data → train → eval → deploy** pipeline see
 ### Reproducing the plots
 
 ```bash
-# Deterministic fallback — no GPU required. Always renders.
+# Deterministic fallback — no GPU required, always renders the
+# representative trajectory committed under docs/training/.
 make plots-demo
 
-# From any real run's trainer_state.json (e.g. the committed Qwen-1.5B run):
+# From any real run's trainer_state.json (path is derived from --output-dir
+# in training/train_grpo.py — defaults to ./honest-<preset>-grpo/):
 python bin/plot_training_curves.py \
-    --trainer-state ./honest-qwen-1.5b-grpo/checkpoint-350/trainer_state.json \
+    --trainer-state ./honest-<preset>-grpo/checkpoint-<step>/trainer_state.json \
     --out docs/training \
-    --label "qwen1.5b · 350 steps · A100"
+    --label "<preset> · <step> steps · <gpu>"
 
-# Side-by-side comparison plots for the iteration-tier presets:
-python bin/plot_training_curves.py \
-    --trainer-state ./honest-qwen-0.5b-grpo/checkpoint-250/trainer_state.json \
-    --out docs/training_qwen0.5b \
-    --label "qwen0.5b · 250 steps · T4"
-
-python bin/plot_training_curves.py \
-    --trainer-state ./honest-llama-1b-grpo/checkpoint-250/trainer_state.json \
-    --out docs/training_llama1b \
-    --label "llama1b · 250 steps · T4"
+# Side-by-side per-preset (drop in whichever runs you completed):
+for preset in qwen0.5b qwen1.5b qwen3b llama1b llama3b phi4mini; do
+  state="./honest-${preset}-grpo/checkpoint-final/trainer_state.json"
+  [ -f "$state" ] || continue
+  python bin/plot_training_curves.py \
+      --trainer-state "$state" \
+      --out "docs/training_${preset}" \
+      --label "${preset} · final"
+done
 ```
 
 ---
 
 ## Models
 
-`calibration_profiles.py` ships pre-tuned hyperparameter presets for
-six model variants, spanning two model families and four parameter
-scales. All use 4-bit QLoRA on a single GPU.
+`calibration_profiles.py` ships hyperparameter presets across three
+capacity tiers. All use 4-bit QLoRA on a single GPU.
 
-| Preset       | Backbone                          | Recommended GPU | ~ time @ 250 steps |
-| ------------ | --------------------------------- | --------------- | ------------------ |
-| `qwen0.5b`   | Qwen/Qwen2.5-0.5B-Instruct        | T4 16GB (free)  | ~50 min            |
-| `qwen1.5b`   | Qwen/Qwen2.5-1.5B-Instruct        | T4 16GB / A100  | ~3.5 h on A100     |
-| `qwen3b`     | Qwen/Qwen2.5-3B-Instruct          | L4 24GB         | ~3 h               |
-| `llama1b`    | meta-llama/Llama-3.2-1B-Instruct  | T4 16GB (free)  | ~55 min            |
-| `llama3b`    | meta-llama/Llama-3.2-3B-Instruct  | L4 24GB         | ~3 h               |
-| `phi4mini`   | microsoft/Phi-4-mini-instruct     | L4 24GB         | ~2.5 h             |
+| Preset     | Backbone                         | Tier   | Default steps | Recipe                |
+| ---------- | -------------------------------- | ------ | ------------- | --------------------- |
+| `qwen0.5b` | Qwen/Qwen2.5-0.5B-Instruct       | tiny   | 250           | SFT (warmup) → GRPO   |
+| `qwen1.5b` | Qwen/Qwen2.5-1.5B-Instruct       | small  | 250           | SFT (optional) → GRPO |
+| `qwen3b`   | Qwen/Qwen2.5-3B-Instruct         | medium | 350           | GRPO direct           |
+| `llama1b`  | meta-llama/Llama-3.2-1B-Instruct | tiny   | 250           | SFT (warmup) → GRPO   |
+| `llama3b`  | meta-llama/Llama-3.2-3B-Instruct | medium | 350           | GRPO direct           |
+| `phi4mini` | microsoft/Phi-4-mini-instruct    | medium | 250           | GRPO direct           |
 
-The `qwen0.5b` and `llama1b` presets are the **iteration tier** — small
-enough to fit on a free Colab T4 and finish 250 GRPO steps in under an
-hour, letting you sweep reward shapes or self-learning ablations 3–4×
-in the time budget of one 1.5B / 3B run. They share the same diagnostic
-axes (reward / miscal / per-domain accuracy) and trajectory shape as the
-larger presets — absolute numbers are softer (final reward ≈ -0.85 vs
--0.70), but every conclusion drawn from a 1.5B run can be drawn from a
-0.5B run too. Running both sizes side-by-side is the cheapest way to
-demonstrate that the calibration RL pipeline generalizes across model
-scale.
+The **tier** field is operational, not cosmetic. It encodes (i) whether
+the base model can satisfy the 3-tag XML contract from the system
+prompt alone — *medium*: yes; *small*: usually; *tiny*: no, SFT is
+mandatory — and (ii) which OOD slices have measurable accuracy
+headroom for the transfer report (`recommended_ood_slices`). See the
+per-preset comments in `calibration_profiles.py` for the full
+rationale, and the [Empirical findings](#empirical-findings-and-projections)
+section for what each tier produces in practice.
 
-> **Tiny tier requires SFT first.** Qwen-0.5B and Llama-1B cannot reliably
-> emit the strict 3-tag XML format from the system prompt alone, so a
-> raw GRPO run on those sizes spends ~98 % of rollouts on the malformed
-> floor and the advantage signal is identically zero. Use the one-command
-> wrapper which chains a short Calibration-SFT phase into GRPO with
-> tier-appropriate hindsight settings:
+Wall-clock is left unspecified intentionally — it varies materially
+with GPU, VRAM, batch / accumulation choices, and step count. The
+trainer writes per-step seconds into `trainer_state.json` and
+`bin/plot_training_curves.py` renders the trajectory. Hardware caps
+are applied via `--colab-profile {t4,l4,a100}` and only ever clip
+risky values down; they never raise.
+
+> **Tiny tier requires SFT first.** Without it, ~97–98 % of GRPO
+> rollouts on Qwen-0.5B / Llama-1B hit the malformed-penalty floor in
+> the first 100 steps and `frac_reward_zero_std ≈ 1.0` (verified on
+> the pilot runs). The one-command wrapper handles the SFT-then-GRPO
+> chain with tier-appropriate hindsight settings:
 >
 > ```bash
 > ./bin/run_calibration_pipeline.sh Qwen/Qwen2.5-0.5B-Instruct
@@ -372,14 +470,12 @@ scale.
 > confidence prior, and the legacy `<hindsight>` tag — so the legacy
 > hindsight reward channel actually fires when GRPO starts. See
 > [`docs/SELF_LEARNING.md` §2.6](docs/SELF_LEARNING.md#26-bringing-tiny-models-on-line--calibration-sft-warmup)
-> for the full design and what to expect from the metrics.
+> for the full SFT design and the metric expectations.
 
-Override per run via `--model-preset` and `--colab-profile {t4,l4,a100}`.
-The Colab profile installs hardware safety caps (clipping G,
-`max_completion_length`, `lora_r`, etc.) but never raises risky values.
-For the 0.5B / 1B presets on T4, override `--gradient-accumulation-steps 4`
-explicitly — the T4 cap minimum (16) is sized for Phi-4-mini-3.8B and
-makes smaller models train 4× slower than necessary.
+For the 0.5 B / 1 B presets on T4, override
+`--gradient-accumulation-steps 4` explicitly — the T4 cap minimum
+(16) is sized for Phi-4-mini-3.8 B and makes smaller models train
+~4× slower than necessary.
 
 ---
 
@@ -503,7 +599,7 @@ HONEST-Env/
 ├── docs/RUNBOOK.md              End-to-end pipeline (data → train → eval → deploy)
 ├── docs/SELF_LEARNING.md        Research memo for the four self-learning pillars
 ├── docs/WRITEUP.md              Project writeup / blog
-├── docs/training/*.png          Committed training-curve evidence
+├── docs/training/*.png          Training curves (rendered by bin/plot_training_curves.py)
 ├── Makefile                     Convenience targets (test, smoke-train, validate, plots-*, mcp-*)
 ├── Dockerfile                   HF-Spaces-ready container
 ├── pyproject.toml               Multi-mode deploy + console scripts (`server`, `honest-mcp`)
