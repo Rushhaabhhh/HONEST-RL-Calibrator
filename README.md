@@ -80,8 +80,25 @@ This project fixes both with a single training loop:
   self-play (see [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md)).
 
 After training, expected calibration error (ECE), Brier score, and
-AUROC are reported in-distribution and on out-of-distribution domains
-(medical, legal) the model never saw during training.
+AUROC are reported in-distribution and on a five-slice OOD suite the
+model never saw during training:
+
+| OOD slice      | source                                  | random floor |
+|----------------|-----------------------------------------|:------------:|
+| `commonsense`  | `tau/commonsense_qa`                    |     0.20     |
+| `science_easy` | `allenai/ai2_arc` ARC-Easy              |     0.25     |
+| `science_hard` | `cais/mmlu` astronomy                   |     0.25     |
+| `medical`      | `cais/mmlu` professional_medicine       |     0.25     |
+| `legal`        | AGIEval LSAT-LR (MMLU law fallback)     |     0.20     |
+
+The set is **tier-aware**: tiny models (Qwen-0.5B, Llama-1B) only have
+measurable accuracy headroom on the first three slices, so
+`full_eval.py --ood-slices auto` skips `medical` and `legal` for those
+sizes. The transferability claim ("calibration trained on math/code/logic
+generalises to OOD") is rendered by `eval/compare_runs.py` as a
+**Calibration Transfer** table with per-slice ΔECE 95 % paired-bootstrap
+CIs and a single transfer-ratio number — see
+[`docs/RUNBOOK.md` §5](docs/RUNBOOK.md#5--comparison--success-metrics).
 
 ---
 

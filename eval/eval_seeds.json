@@ -17,13 +17,23 @@
   },
 
   "ood": {
+    "_doc": "Five OOD slices arranged from easiest to hardest. The transferability claim ('RL-trained calibration generalises to OOD') is only provable when the model scores measurably above the random-MCQ floor — at the floor, ECE/Brier deltas collapse into bootstrap noise. Tiny models (Qwen-0.5B, Llama-1B) only have measurable headroom on commonsense/science_easy/science_hard; small models add medical; medium adds legal.",
     "datasets": {
-      "medical": "cais/mmlu :: professional_medicine :: validation",
-      "legal":   "dmayhem93/agieval-lsat-lr :: test (fallback: hails/agieval-lsat-lr or cais/mmlu :: professional_law :: test)"
+      "commonsense":  "tau/commonsense_qa :: validation                    (5-way MCQ, floor 0.20)",
+      "science_easy": "allenai/ai2_arc :: ARC-Easy :: test                  (4-way MCQ, floor 0.25)",
+      "science_hard": "cais/mmlu :: astronomy :: test                       (4-way MCQ, floor 0.25)",
+      "medical":      "cais/mmlu :: professional_medicine :: validation     (4-way MCQ, floor 0.25)",
+      "legal":        "dmayhem93/agieval-lsat-lr :: test (fallback: hails/agieval-lsat-lr or cais/mmlu :: professional_law :: test)  (5-way MCQ, floor 0.20)"
+    },
+    "tier_defaults": {
+      "tiny":   ["commonsense", "science_easy", "science_hard"],
+      "small":  ["commonsense", "science_easy", "science_hard", "medical"],
+      "medium": ["commonsense", "science_easy", "science_hard", "medical", "legal"]
     },
     "shuffle_seed": 42,
     "samples_per_domain": 200,
-    "fetch_command": "python eval/ood/fetch_ood_data.py --n 200 --seed 42"
+    "fetch_command": "python eval/ood/fetch_ood_data.py --tier <tiny|small|medium|all> --n 200 --seed 42",
+    "fetch_command_legacy": "python eval/ood/fetch_ood_data.py --n 200 --seed 42  # default = full medium suite"
   },
 
   "format_sft": {
@@ -34,6 +44,7 @@
 
   "notes": [
     "Increasing samples_per_condition is safe: seeds 1000..1019 are a *subset* of 1000..1099, so existing reports remain comparable.",
-    "Changing the seed formula will silently invalidate prior comparisons — if you ever need to, change the field name (e.g. `seed_formula_v2`) and bump the result-file schema."
+    "Changing the seed formula will silently invalidate prior comparisons — if you ever need to, change the field name (e.g. `seed_formula_v2`) and bump the result-file schema.",
+    "OOD slice files are auto-discovered by full_eval.py from eval/ood/. Adding a new dataset = add the slice to calibration_profiles.OOD_SLICE_REGISTRY + write a fetcher in fetch_ood_data.py — no plumbing changes elsewhere."
   ]
 }

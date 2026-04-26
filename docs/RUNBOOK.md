@@ -91,16 +91,45 @@ You should see ~13k problems spread across (math, 1..5),
 (code, 3..5), (logic, 1..5). A bucket with `0` count will *not* error —
 the controller will just never dispense that condition.
 
-### OOD data (medical + legal)
+### OOD data (5-slice transfer suite)
 
 OOD data is fetched from public HuggingFace datasets and is **never**
-seen during training. Run this once per project setup.
+seen during training. The five-slice suite spans the difficulty range
+that small *and* medium models can engage with:
+
+| slice          | source (HF dataset)                         | floor | tiny-model headroom |
+|----------------|---------------------------------------------|-------|---------------------|
+| `commonsense`  | `tau/commonsense_qa` (validation)           | 0.20  | ~30-45 %            |
+| `science_easy` | `allenai/ai2_arc` ARC-Easy (test)           | 0.25  | ~45-60 %            |
+| `science_hard` | `cais/mmlu` astronomy (test)                | 0.25  | ~25-35 %            |
+| `medical`      | `cais/mmlu` professional_medicine (val)     | 0.25  | floor (medium+ only)|
+| `legal`        | AGIEval LSAT-LR (with MMLU law fallback)    | 0.20  | floor (medium+ only)|
+
+**Why five slices instead of two?** The transferability claim ("RL-trained
+calibration generalises to OOD") is empirically *unprovable* on slices
+where the model sits at the random-MCQ floor: ECE/Brier deltas collapse
+into bootstrap noise. Tiny models (Qwen-0.5B, Llama-1B) only have
+measurable headroom on `commonsense`/`science_easy`/`science_hard`, so
+the tier-aware fetcher and `full_eval.py --ood-slices auto` skip the
+hard slices for those models.
 
 ```bash
+# Tier-aware fetch (recommended — picks slices appropriate to your tier)
+PYTHONPATH=. python eval/ood/fetch_ood_data.py --tier tiny     # 3 slices: commonsense + science_easy + science_hard
+PYTHONPATH=. python eval/ood/fetch_ood_data.py --tier small    # 4 slices: tiny + medical
+PYTHONPATH=. python eval/ood/fetch_ood_data.py --tier medium   # 5 slices: full suite
+PYTHONPATH=. python eval/ood/fetch_ood_data.py --tier all      # alias for medium
+
+# Or pick exactly what you want:
+PYTHONPATH=. python eval/ood/fetch_ood_data.py --slices commonsense,science_easy --n 200
+
+# Default (no flags) = full medium suite, backward-compatible with prior reports.
 PYTHONPATH=. python eval/ood/fetch_ood_data.py --n 200
-# → eval/ood/medqa_sample.jsonl   (200 medical MCQs from MMLU professional_medicine)
-# → eval/ood/lsat_sample.jsonl    (200 LSAT-LR logical-reasoning MCQs)
 ```
+
+Outputs (one JSONL per slice in `eval/ood/`, auto-discovered by `full_eval.py`):
+`commonsense_qa_sample.jsonl`, `arc_easy_sample.jsonl`,
+`mmlu_astronomy_sample.jsonl`, `medqa_sample.jsonl`, `lsat_sample.jsonl`.
 
 ---
 
@@ -336,37 +365,62 @@ For Llama-3B and Phi-4-mini (~3.8B), use L4 instead of A100:
 
 ## 4 · Full evaluation (in-distribution + OOD)
 
-Same metrics battery as Step 2, run on the **trained adapter**, with an
-extra OOD pass on medical and legal questions.
+Same metrics battery as Step 2, run on the **trained adapter**, with a
+tier-aware OOD pass that auto-discovers JSONL slices written by
+`fetch_ood_data.py`.
 
 ```bash
+# Headline run (medium tier, all 5 OOD slices)
 ./venv/bin/python eval/full_eval.py \
     --model-id          Qwen/Qwen2.5-3B-Instruct \
     --adapter-path      ./honest-qwen-3b-grpo/final_adapters \
     --baseline-results  eval/baseline_results.json \
     --ood-dir           eval/ood \
+    --ood-slices        auto \
     --samples           100 \
     --output            eval/full_results.json
+
+# Tiny-model run (Qwen-0.5B / Llama-1B): tier-auto picks the 3
+# small-model-friendly slices (commonsense, science_easy, science_hard)
+# and skips medical+legal.
+./venv/bin/python eval/full_eval.py \
+    --model-id        Qwen/Qwen2.5-0.5B-Instruct \
+    --adapter-path    ./grpo-qwen-0.5b/final_adapters \
+    --ood-slices      auto \
+    --output          eval/full_results_qwen05b.json
 ```
+
+> **Important:** to make the calibration-transfer claim provable in
+> Step 5, also run `full_eval.py` *without* `--adapter-path` against
+> the same `--ood-slices` and save it as `eval/baseline_full.json`.
+> The compare_runs.py transfer report needs OOD samples on **both**
+> sides to show before/after deltas. Without the no-adapter run,
+> the transfer table will only have post-RL OOD numbers.
 
 Output (`eval/full_results.json`):
 
 ```jsonc
 {
-  "model_id": "Qwen/Qwen2.5-3B-Instruct",
-  "adapter":  "./honest-qwen-3b-grpo/final_adapters",
-  "in_distribution": {
-    "metrics":      { "ece": ..., "brier": ..., "auroc": ..., ... },
-    "per_domain":     { "math": {...}, "code": {...}, "logic": {...} },
-    "per_difficulty": { "1": {...}, ..., "5": {...} }
-  },
+  "model_id":     "Qwen/Qwen2.5-3B-Instruct",
+  "adapter_path": "./honest-qwen-3b-grpo/final_adapters",
+  "preset":       "qwen3b",
+  "ood_slices":   ["commonsense", "science_easy", "science_hard", "medical", "legal"],
+  "in_distribution": { "math_1": {...}, ..., "logic_5": {...} },
   "ood": {
-    "medical": { "metrics": { "ece": ..., "brier": ... } },
-    "legal":   { "metrics": { "ece": ..., "brier": ... } }
+    "commonsense":  { "ece": ..., "brier": ..., "random_floor": 0.20, "samples": [...] },
+    "science_easy": { "ece": ..., "brier": ..., "random_floor": 0.25, "samples": [...] },
+    "science_hard": { "ece": ..., "brier": ..., "random_floor": 0.25, "samples": [...] },
+    "medical":      { "ece": ..., "brier": ..., "random_floor": 0.25, "samples": [...] },
+    "legal":        { "ece": ..., "brier": ..., "random_floor": 0.20, "samples": [...] }
   },
-  "baseline_metrics": { ... }   // mirrored from Step 2 for the comparator
+  "overall": { "ece": ..., "brier": ..., "auroc": ..., "accuracy": ..., ... }
 }
 ```
+
+`--ood-slices` accepts:
+- `auto` (default): tier-aware default for `--model-id` / `--model-preset`.
+- `all`: full registry (5 slices).
+- a comma-separated subset, e.g. `commonsense,science_easy`.
 
 To skip ID or OOD individually: `--skip-indist` / `--skip-ood`.
 To debug locally without a GPU: `--dry-run`.
@@ -376,36 +430,58 @@ To debug locally without a GPU: `--dry-run`.
 ## 5 · Comparison & success metrics
 
 ```bash
+# Recommended: pass two full_eval JSONs (one before-RL, one after-RL).
+# Both need OOD samples for the calibration-transfer table.
 ./venv/bin/python eval/compare_runs.py \
-    --baseline    eval/baseline_results.json \
+    --baseline    eval/baseline_full.json \
     --after       eval/full_results.json \
     --output      eval/comparison.md \
     --plot --plot-output eval/plots/comparison.png
+
+# Backward-compat: a baseline_eval.py JSON (in-dist only) also works,
+# but the transfer table will be empty for the baseline column.
+./venv/bin/python eval/compare_runs.py \
+    --baseline    eval/baseline_results.json \
+    --after       eval/full_results.json \
+    --output      eval/comparison.md
 ```
 
 `comparison.md` is the deliverable artefact — paste it directly into a
-report or pitch deck. It contains:
+report or pitch deck. It now contains six sections:
 
-1. Headline table (ECE, Brier, AUROC) before vs after, with Δ and a
+1. **Headline table** (ECE, Brier, AUROC) before vs after, with Δ and a
    95% bootstrap CI on Δ Brier.
-2. Per-domain breakdown (math / code / logic).
-3. Per-difficulty breakdown (1..5, plus 6+ if SMC promoted the ceiling).
-4. OOD slice (medical, legal).
-5. Reliability diagram PNG (`comparison.png`).
+2. **Per-domain breakdown** (math / code / logic).
+3. **In-distribution vs OOD (after training)** — generalization gap row.
+4. **Calibration Transfer (HEADLINE CLAIM)** — per-slice ΔECE table
+   with 95% paired-bootstrap CIs, status flags
+   (`✓ transferred` / `~ partial` / `⚠ at floor` / `✗ no transfer`),
+   plus a single transfer-ratio number summarising how much of the
+   in-distribution calibration gain carried to OOD.
+5. **Confidence histogram** (text bars, before vs after).
+6. **Operating-mode shifts** (format/abstain/malformed rate deltas).
+
+Plus the reliability diagram PNG when you pass `--plot`.
 
 ### Success criteria
 
 A pillar/run "ships" only if **all** the following are met. These are
 the pass/fail gates for a publishable headline.
 
-| Gate                                | Threshold                          |
-| ----------------------------------- | ---------------------------------- |
-| **Δ ECE (in-distribution)**         | ≤ -0.03 (lower is better)          |
-| **Δ Brier (in-distribution)**       | ≤ -0.02, with 95% CI excluding 0   |
-| **Δ ECE (OOD, both medical + legal)**| ≤ -0.02 (transfer requirement)    |
-| **AUROC (in-distribution)**         | ≥ 0.65 (no discrimination collapse)|
-| **Format rate**                     | ≥ 0.90 (parsing did not regress)   |
-| **Abstain rate at d=5**             | > abstain rate at d=1              |
+| Gate                                | Threshold                                     |
+| ----------------------------------- | --------------------------------------------- |
+| **Δ ECE (in-distribution)**         | ≤ -0.03 (lower is better)                     |
+| **Δ Brier (in-distribution)**       | ≤ -0.02, with 95% CI excluding 0              |
+| **Calibration transfer ratio**      | ≥ 0.5× on slices clear of floor               |
+| **Δ ECE on ≥2 OOD slices**          | < 0 with 95% CI upper bound < 0 (✓ transferred) |
+| **AUROC (in-distribution)**         | ≥ 0.65 (no discrimination collapse)           |
+| **Format rate**                     | ≥ 0.90 (parsing did not regress)              |
+| **Abstain rate at d=5**             | > abstain rate at d=1                         |
+
+For tiny models, the OOD transfer gate applies to the
+`commonsense` / `science_easy` / `science_hard` slices — `medical` and
+`legal` are at the random-MCQ floor at this scale and the transfer
+ratio averages exclude them automatically (status `⚠ at floor`).
 
 If a gate fails on the headline run but passes per-domain (e.g. math
 improves but code regresses), report per-domain and investigate the

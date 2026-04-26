@@ -21,7 +21,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -43,10 +43,15 @@ from eval.metrics import (  # noqa: E402
 )
 from server.generators import code_gen, logic_gen, math_gen      # noqa: E402
 from calibration_profiles import (  # noqa: E402
+    OOD_SLICE_REGISTRY,
     REASONING_MODES,
+    SUPPORTED_OOD_SLICES,
     SUPPORTED_PRESETS,
     get_preset,
+    ood_slice_filename,
+    ood_slice_floor,
     prompt_templates,
+    recommend_ood_slices,
 )
 
 
@@ -245,6 +250,48 @@ def run_indist_eval(
     return conditions
 
 
+def _discover_ood_slices(
+    ood_dir: Path,
+    requested: Optional[List[str]],
+) -> List[tuple]:
+    """Resolve which OOD slices to evaluate, returning ``(slice_name, jsonl_path)`` pairs.
+
+    Resolution order:
+      1. If ``requested`` is provided, use exactly that list (preserves
+         caller order for stable report layout). Each name must be a
+         registered slice.
+      2. Otherwise, scan ``ood_dir`` for any registered slice's JSONL
+         file that exists on disk and return them in
+         ``SUPPORTED_OOD_SLICES`` order.
+
+    Missing files are skipped with a warning rather than raising — this
+    keeps the eval runnable even when only a subset of slices has been
+    fetched (e.g. tiny-tier runs that skipped medical/legal).
+    """
+    pairs: List[tuple] = []
+
+    if requested:
+        for name in requested:
+            if name not in OOD_SLICE_REGISTRY:
+                print(f"  ⚠ Unknown OOD slice '{name}' (skipping). "
+                      f"Valid: {', '.join(SUPPORTED_OOD_SLICES)}")
+                continue
+            fpath = ood_dir / ood_slice_filename(name)
+            if not fpath.exists():
+                print(f"  ⚠ OOD slice file missing: {fpath} "
+                      f"(skipping; run eval/ood/fetch_ood_data.py --slices {name}).")
+                continue
+            pairs.append((name, fpath))
+        return pairs
+
+    # Auto-discovery — keep the canonical registry order.
+    for name in SUPPORTED_OOD_SLICES:
+        fpath = ood_dir / ood_slice_filename(name)
+        if fpath.exists():
+            pairs.append((name, fpath))
+    return pairs
+
+
 def run_ood_eval(
     model,
     tokenizer,
@@ -253,8 +300,14 @@ def run_ood_eval(
     user_template: str,  # kept for backward-compat; OOD uses its own template
     max_new_tokens: int,
     response_fn=None,
+    slices: Optional[List[str]] = None,
 ) -> dict:
-    """Run OOD evaluation on medical and legal jsonl files.
+    """Run OOD evaluation on every available slice in ``ood_dir``.
+
+    Slices are auto-discovered from the canonical OOD registry (see
+    ``calibration_profiles.OOD_SLICE_REGISTRY``); pass an explicit
+    ``slices=`` list to restrict to a subset (used by tier-aware
+    operator runs on tiny models).
 
     Differences vs in-distribution eval (intentional, OOD-only):
       * Uses an MCQ-specific user template so the model knows to emit a
@@ -266,20 +319,26 @@ def run_ood_eval(
         the jsonl ground-truth and the model's answer don't count as wrong.
       * ``format_valid`` remains defined as "strict parser succeeded", so
         the format-rate metric stays honest and comparable with training.
+      * Each per-sample record carries ``ood_slice`` (the registry key)
+        AND ``domain`` (legacy alias). ``compare_runs.py`` uses the
+        former for the per-slice transfer table.
     """
     _generate = response_fn or generate_response
-    results   = {}
+    results: Dict[str, dict] = {}
 
-    for domain, fname in [("medical", "medqa_sample.jsonl"), ("legal", "lsat_sample.jsonl")]:
-        fpath = ood_dir / fname
-        if not fpath.exists():
-            print(f"  OOD file not found: {fpath} — run eval/ood/fetch_ood_data.py first.")
-            continue
+    pairs = _discover_ood_slices(ood_dir, slices)
+    if not pairs:
+        print(f"  No OOD slices found in {ood_dir}. "
+              f"Run eval/ood/fetch_ood_data.py first.")
+        return results
 
+    for slice_name, fpath in pairs:
         with open(fpath, encoding="utf-8") as f:
             rows = [json.loads(line) for line in f if line.strip()]
 
-        print(f"  OOD [{domain}] {len(rows)} samples...", end=" ", flush=True)
+        floor = ood_slice_floor(slice_name)
+        print(f"  OOD [{slice_name:13s}] {len(rows):>4} samples (floor={floor:.2f})...",
+              end=" ", flush=True)
         t0 = time.time()
         records = []
 
@@ -316,30 +375,38 @@ def run_ood_eval(
                 reward = -1.0  # MALFORMED_PENALTY, preserves prior semantics
 
             records.append({
-                "domain":       domain,  # "medical" or "legal"
+                "domain":       slice_name,        # legacy alias (compare_runs reads this)
+                "ood_slice":    slice_name,        # canonical registry key
                 "question":     question[:200],
                 "ground_truth": ground_truth,
                 "raw_response": raw[:200],
                 "parsed_type":  parsed["type"],
-                "parsed_mode":  parsed_mode,  # extra bookkeeping; safe to ignore
+                "parsed_mode":  parsed_mode,
                 "recovered":    parsed_mode in ("lenient", "lenient_default_conf"),
                 "correct":      correct,
                 "confidence":   confidence,
                 "reward":       reward,
                 "format_valid": strict_valid,
-                "source":       row.get("source", domain),
+                "source":       row.get("source", slice_name),
             })
 
         result  = _evaluate_records(records)
+        result["random_floor"] = floor  # surfaced in transfer report
         # Lightweight recovery stats for printed summary (non-breaking).
         n_recovered = sum(1 for r in records if r.get("recovered"))
         elapsed = time.time() - t0
+        # Highlight slices where the model is at the random-MCQ floor — the
+        # calibration-transfer claim is unprovable on those.
+        floor_flag = " ⚠ at floor" if (
+            result["accuracy"] - floor < 0.05 and result["accuracy"] > 0
+        ) else ""
         print(
             f"acc={result['accuracy']:.1%}  fmt(strict)={result['format_rate']:.1%}  "
             f"recovered={n_recovered}/{len(records)}  "
-            f"brier={result['brier']:.4f}  ece={result['ece']:.4f}  [{elapsed:.1f}s]"
+            f"brier={result['brier']:.4f}  ece={result['ece']:.4f}  "
+            f"[{elapsed:.1f}s]{floor_flag}"
         )
-        results[domain] = result
+        results[slice_name] = result
 
     return results
 
@@ -434,11 +501,36 @@ def main():
     parser.add_argument("--skip-indist",       action="store_true",
                         help="Skip in-distribution eval (OOD only)")
     parser.add_argument("--skip-ood",         action="store_true")
+    parser.add_argument(
+        "--ood-slices",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated subset of OOD slices to evaluate "
+            f"(any of: {', '.join(SUPPORTED_OOD_SLICES)}). "
+            "Default: tier-aware list inferred from --model-id "
+            "(tiny tier → commonsense + science_easy + science_hard; "
+            "small tier adds medical; medium tier adds legal). "
+            "Pass 'auto' for the tier-aware default, 'all' for the "
+            "full registry, or any subset."
+        ),
+    )
     parser.add_argument("--dry-run",           action="store_true",
                         help="Use stub inferencer — no GPU needed")
     args = parser.parse_args()
     preset = get_preset(args.model_id, args.model_preset)
     system_prompt, user_template = prompt_templates(args.reasoning_mode)
+
+    # Resolve --ood-slices into a concrete list. None / "auto" → tier-aware
+    # default for the preset; "all" → full registry; otherwise comma-sep
+    # subset. Validation happens inside _discover_ood_slices.
+    requested_slices: Optional[List[str]] = None
+    if args.ood_slices is None or args.ood_slices.strip().lower() == "auto":
+        requested_slices = list(recommend_ood_slices(preset.name))
+    elif args.ood_slices.strip().lower() == "all":
+        requested_slices = list(SUPPORTED_OOD_SLICES)
+    else:
+        requested_slices = [s.strip() for s in args.ood_slices.split(",") if s.strip()]
 
     # Stub response function for dry-run
     if args.dry_run:
@@ -495,6 +587,7 @@ def main():
     # ── OOD ──────────────────────────────────────────────────────────────────
     if not args.skip_ood:
         print("\n── OOD evaluation ──────────────────────────────────────────────────")
+        print(f"  slices: {', '.join(requested_slices)}")
         ood_results = run_ood_eval(
             model,
             tokenizer,
@@ -503,8 +596,10 @@ def main():
             user_template=user_template,
             max_new_tokens=args.max_new_tokens,
             response_fn=response_fn,
+            slices=requested_slices,
         )
         output["ood"] = ood_results
+        output["ood_slices"] = list(ood_results.keys())  # explicit for compare_runs
 
     # ── Overall ───────────────────────────────────────────────────────────────
     all_confs, all_corrects = [], []

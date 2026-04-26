@@ -118,6 +118,29 @@ class CalibrationPreset:
     recommended_sft_max_difficulty: int
     recommended_sft_hindsight_frac: float
 
+    # --- OOD evaluation slice recommendations -----------------------------
+    # ``recommended_ood_slices`` enumerates the OOD JSONL files (in
+    # ``eval/ood/``) that this tier can engage with at *measurable*
+    # accuracy variance. The transferability claim ("RL-trained
+    # calibration generalises to OOD") only holds when the model can
+    # actually score above the random-MCQ floor on the slice — at the
+    # floor, ECE/Brier deltas collapse into bootstrap noise and the
+    # claim is unprovable.
+    #
+    #   tiny   : ["commonsense", "science_easy", "science_hard"]
+    #            ARC-Easy + CommonsenseQA + MMLU-astronomy span 25-65 %
+    #            accuracy on Qwen-0.5B / Llama-1B, giving real ECE
+    #            headroom (typically 0.15-0.30 pre-RL).
+    #   small  : tiny + ["medical"]
+    #            1.5B models reach ~30-45 % on professional_medicine,
+    #            enough to show transfer, while LSAT-LR remains below
+    #            the floor.
+    #   medium : tiny + ["medical", "legal"]
+    #            All five slices.
+    #
+    # Operators can override via ``--ood-slices`` on full_eval.py.
+    recommended_ood_slices: tuple = ()
+
 
 MODEL_PRESETS: Dict[str, CalibrationPreset] = {
     # ─────────────────────────────────────────────────────────────────────
@@ -165,6 +188,11 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=2,
         recommended_sft_max_difficulty=2,
         recommended_sft_hindsight_frac=0.5,
+        # Tiny tier needs OOD slices it can score above the random-MCQ
+        # floor on. ARC-Easy and CommonsenseQA hit ~35-55 % on Qwen-0.5B,
+        # MMLU-astronomy adds a STEM probe at ~25-35 %. Skipping
+        # professional_medicine + LSAT-LR since both pin at floor.
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard"),
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-1.5B-Instruct  →  T4 16 GB / L4 24 GB / A100 (fits in bf16
@@ -207,6 +235,10 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=2,
         recommended_sft_max_difficulty=3,
         recommended_sft_hindsight_frac=0.4,
+        # Small tier picks up MMLU professional_medicine (~30-42 % on
+        # Qwen-1.5B) on top of the tiny set. LSAT-LR still hugs the
+        # 20 % random floor at this size, so we keep it for ``medium``+.
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard", "medical"),
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-3B-Instruct  →  L4 24 GB (recommended) / A10G 24 GB
@@ -246,6 +278,9 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=1,
         recommended_sft_max_difficulty=4,
         recommended_sft_hindsight_frac=0.3,
+        # Medium tier spans the full transfer suite — easy commonsense
+        # through hard professional MCQ.
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard", "medical", "legal"),
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Llama-3.2-1B-Instruct  →  Colab T4 16 GB / L4 24 GB
@@ -291,6 +326,10 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=2,
         recommended_sft_max_difficulty=2,
         recommended_sft_hindsight_frac=0.5,
+        # Llama-1B leans STEM-shy but is solid on commonsense and
+        # ARC-Easy; same tiny set as Qwen-0.5B keeps the comparison
+        # apples-to-apples.
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard"),
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Llama-3.2-3B-Instruct  →  L4 24 GB
@@ -326,6 +365,7 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=1,
         recommended_sft_max_difficulty=4,
         recommended_sft_hindsight_frac=0.3,
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard", "medical", "legal"),
     ),
     # ─────────────────────────────────────────────────────────────────────
     # Phi-4-mini-instruct  →  L4 24 GB (sequential after Llama)
@@ -357,6 +397,7 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
         recommended_sft_epochs=1,
         recommended_sft_max_difficulty=4,
         recommended_sft_hindsight_frac=0.3,
+        recommended_ood_slices=("commonsense", "science_easy", "science_hard", "medical", "legal"),
     ),
 }
 
@@ -368,6 +409,112 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
 
 
 SUPPORTED_TIERS = ("tiny", "small", "medium")
+
+
+# ---------------------------------------------------------------------------
+# OOD slice registry — the canonical list of OOD evaluation slices and the
+# JSONL filenames they materialise to in ``eval/ood/``. ``fetch_ood_data.py``
+# writes these files; ``full_eval.py`` reads them back. Keeping the mapping
+# in one place lets us add a new slice (e.g. "math_word_easy") and have it
+# automatically pick up tier-aware defaults, fetch CLI flags, and
+# transfer-report rendering with no further plumbing.
+#
+# Each entry has:
+#   - ``filename``  : on-disk JSONL the fetcher writes / full_eval reads.
+#   - ``source``    : human-readable HF dataset citation (used in seeds.json
+#                     and report headers).
+#   - ``floor``     : random-guess accuracy for this MCQ format. Used to
+#                     decide whether a tier *can* produce a measurable
+#                     calibration signal (model_acc - floor) > 0.05 → ok.
+# ---------------------------------------------------------------------------
+
+OOD_SLICE_REGISTRY: Dict[str, Dict[str, object]] = {
+    "commonsense": {
+        "filename": "commonsense_qa_sample.jsonl",
+        "source":   "tau/commonsense_qa :: validation",
+        "floor":    0.20,  # 5-way MCQ
+    },
+    "science_easy": {
+        "filename": "arc_easy_sample.jsonl",
+        "source":   "allenai/ai2_arc :: ARC-Easy :: test",
+        "floor":    0.25,  # 4-way MCQ
+    },
+    "science_hard": {
+        "filename": "mmlu_astronomy_sample.jsonl",
+        "source":   "cais/mmlu :: astronomy :: test",
+        "floor":    0.25,
+    },
+    "medical": {
+        "filename": "medqa_sample.jsonl",
+        "source":   "cais/mmlu :: professional_medicine :: validation",
+        "floor":    0.25,
+    },
+    "legal": {
+        "filename": "lsat_sample.jsonl",
+        "source":   "dmayhem93/agieval-lsat-lr :: test (fallback: cais/mmlu :: professional_law)",
+        "floor":    0.20,  # AGIEval LSAT-LR is 5-way; MMLU law is 4-way
+    },
+}
+
+
+SUPPORTED_OOD_SLICES = tuple(OOD_SLICE_REGISTRY.keys())
+
+
+def ood_slice_filename(slice_name: str) -> str:
+    """Canonical on-disk filename for an OOD slice (e.g. 'commonsense' →
+    'commonsense_qa_sample.jsonl').
+
+    Raises ``ValueError`` for unknown slices so typos surface fast.
+    """
+    if slice_name not in OOD_SLICE_REGISTRY:
+        valid = ", ".join(sorted(OOD_SLICE_REGISTRY))
+        raise ValueError(f"Unknown OOD slice '{slice_name}'. Known slices: {valid}")
+    return str(OOD_SLICE_REGISTRY[slice_name]["filename"])
+
+
+def ood_slice_floor(slice_name: str) -> float:
+    """Random-guess accuracy floor for an OOD slice.
+
+    Used by the calibration-transfer report to flag slices where the
+    model is too close to the floor for the transfer claim to hold.
+    """
+    if slice_name not in OOD_SLICE_REGISTRY:
+        return 0.25  # MCQ default
+    return float(OOD_SLICE_REGISTRY[slice_name]["floor"])
+
+
+# Tier → default slice list. Mirrors per-preset ``recommended_ood_slices``
+# but exposed as a tier-level shortcut for the fetcher CLI (which doesn't
+# need a specific model id).
+_TIER_DEFAULT_OOD_SLICES: Dict[str, tuple] = {
+    "tiny":   ("commonsense", "science_easy", "science_hard"),
+    "small":  ("commonsense", "science_easy", "science_hard", "medical"),
+    "medium": ("commonsense", "science_easy", "science_hard", "medical", "legal"),
+}
+
+
+def tier_ood_slices(tier: str) -> tuple:
+    """Default OOD slice list for a tier name.
+
+    Unknown tier → returns the ``medium`` (full) suite so callers err on
+    the side of richer evaluation.
+    """
+    return _TIER_DEFAULT_OOD_SLICES.get(tier, _TIER_DEFAULT_OOD_SLICES["medium"])
+
+
+def recommend_ood_slices(preset_name: str) -> tuple:
+    """Tier-appropriate OOD slice list for a model preset.
+
+    Falls back to the preset's tier default if the preset's
+    ``recommended_ood_slices`` is empty. Unknown preset → ``medium`` tier
+    suite.
+    """
+    if preset_name not in MODEL_PRESETS:
+        return tier_ood_slices("medium")
+    preset = MODEL_PRESETS[preset_name]
+    if preset.recommended_ood_slices:
+        return tuple(preset.recommended_ood_slices)
+    return tier_ood_slices(preset.tier)
 
 
 def is_tiny_tier(preset_name: str) -> bool:
