@@ -26,8 +26,8 @@ confidence** alongside every answer.
 > | 📝 Project writeup | [`docs/WRITEUP.md`](docs/WRITEUP.md) |
 > | 📈 Training evidence (PNG) | [`docs/training/loss_curve.png`](docs/training/loss_curve.png) · [`docs/training/reward_curve.png`](docs/training/reward_curve.png) · [`docs/training/kl_curve.png`](docs/training/kl_curve.png) |
 > | 🔌 MCP deployment wrapper | [`mcp_server/`](mcp_server/) — [`mcp_server/README.md`](mcp_server/README.md) |
-> | 🛠️ End-to-end runbook | [`RUNBOOK.md`](RUNBOOK.md) |
-> | 🧪 Self-learning research memo | [`SELF_LEARNING.md`](SELF_LEARNING.md) |
+> | 🛠️ End-to-end runbook | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) |
+> | 🧪 Self-learning research memo | [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md) |
 >
 > All paths above resolve from a clean `git clone` — no external
 > dependencies are required to inspect the deliverables.
@@ -70,7 +70,7 @@ This project fixes both with a single training loop:
   the model never sits at a saturated reward signal.
 * **Self-learning extensions** (opt-in) — hindsight reasoning,
   prioritized replay, self-mutating curriculum, generator/solver
-  self-play (see [`SELF_LEARNING.md`](SELF_LEARNING.md)).
+  self-play (see [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md)).
 
 After training, expected calibration error (ECE), Brier score, and
 AUROC are reported in-distribution and on out-of-distribution domains
@@ -130,7 +130,7 @@ threshold — exploration without policy collapse.
 │  │   (UnifiedSampler)   │   (adaptive controller)                      │
 │  └── processed/*.jsonl  ├── hindsight.py    ┐                          │
 │                         ├── replay_buffer.py │  Self-learning          │
-│                         ├── mutators.py      │  (SELF_LEARNING.md)     │
+│                         ├── mutators.py      │  (docs/SELF_LEARNING.md)│
 │                         └── self_play.py    ┘                          │
 │                                                                        │
 │  eval/                                          mcp_server/            │
@@ -235,7 +235,7 @@ Per-domain rolling window of 20 episodes:
 ## Self-learning calibration
 
 Four opt-in mechanisms turn the fixed-task GRPO loop into a recursive
-skill amplification system. See [`SELF_LEARNING.md`](SELF_LEARNING.md)
+skill amplification system. See [`docs/SELF_LEARNING.md`](docs/SELF_LEARNING.md)
 for the full research memo.
 
 | Pillar                                | Flag                  | What it adds                                                        |
@@ -270,14 +270,14 @@ make mcp-smoke
 make validate
 
 # Run the OpenEnv server locally
-./run_server.sh
+./bin/run_server.sh
 # Or via Docker (HuggingFace Spaces ready)
 docker build -t honest-rl-calibrator:latest .
 docker run -p 8000:8000 honest-rl-calibrator:latest
 ```
 
 For the full **data → train → eval → deploy** pipeline see
-[`RUNBOOK.md`](RUNBOOK.md).
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ### Reproducing the plots
 
@@ -412,17 +412,19 @@ HONEST-Env/
 ├── client/                      OpenEnv client for remote test runners
 ├── models/                      OpenEnv data classes (Action / Obs / State)
 ├── bin/install-mcp.sh           One-shot MCP installer / health-check
+├── bin/run_server.sh            Local OpenEnv launcher
 ├── bin/plot_training_curves.py  Render committed loss/reward/KL PNGs
+├── bin/install-mcp.sh           Claude Desktop / MCP installer
+├── docs/RUNBOOK.md              End-to-end pipeline (data → train → eval → deploy)
+├── docs/SELF_LEARNING.md        Research memo for the four self-learning pillars
+├── docs/WRITEUP.md              Project writeup / blog
 ├── docs/training/*.png          Committed training-curve evidence
 ├── Makefile                     Convenience targets (test, smoke-train, validate, plots-*, mcp-*)
 ├── Dockerfile                   HF-Spaces-ready container
 ├── pyproject.toml               Multi-mode deploy + console scripts (`server`, `honest-mcp`)
 ├── openenv.yaml                 OpenEnv runtime spec (parsed by `openenv validate`)
 ├── uv.lock                      Pinned resolution for reproducible builds
-├── run_server.sh                Local OpenEnv launcher
-├── README.md                    This file
-├── RUNBOOK.md                   End-to-end pipeline (data → train → eval → deploy)
-└── SELF_LEARNING.md             Research memo for the four self-learning pillars
+└── README.md                    This file
 ```
 
 ---

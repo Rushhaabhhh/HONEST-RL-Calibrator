@@ -17,7 +17,7 @@ This module is **stateless** — it provides:
 
 The two-step protocol (answer → reveal → hindsight) is wired in
 ``server.environment.HonestEnvironment`` and gated by a probability flag
-so HCR adds zero overhead when disabled. See ``SELF_LEARNING.md`` §2 for
+so HCR adds zero overhead when disabled. See ``docs/SELF_LEARNING.md`` §2 for
 the design rationale.
 """
 

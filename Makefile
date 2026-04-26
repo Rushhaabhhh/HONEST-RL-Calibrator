@@ -26,8 +26,8 @@ help:
 	@echo "  mcp-install    Install MCP serving deps + run smoke + health"
 	@echo "  mcp-run        Launch the MCP stdio server (uses HONEST_* env vars)"
 	@echo ""
-	@echo "End-to-end pipeline runbook: RUNBOOK.md"
-	@echo "Self-learning research memo:  SELF_LEARNING.md"
+	@echo "End-to-end pipeline runbook: docs/RUNBOOK.md"
+	@echo "Self-learning research memo:  docs/SELF_LEARNING.md"
 
 test:
 	$(PYTEST) tests/ data/tests/

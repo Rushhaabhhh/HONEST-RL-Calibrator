@@ -7,7 +7,7 @@ Two operating modes
 1. ``--trainer-state PATH`` — read TRL's canonical
    ``trainer_state.json`` (saved automatically inside the trainer's
    ``output_dir``) and emit *real* curves. This is the path
-   ``RUNBOOK.md`` instructs operators to take after a full GPU run::
+   ``docs/RUNBOOK.md`` instructs operators to take after a full GPU run::
 
        python bin/plot_training_curves.py \
               --trainer-state ./honest-qwen3b-grpo/trainer_state.json \

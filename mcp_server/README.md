@@ -300,5 +300,5 @@ Brier-score reward. This MCP server packages that calibrated model so
   ("calibrated cascade").
 
 This is the deployment-side complement to the self-learning RL pipeline
-described in `SELF_LEARNING.md` — the model learns to be calibrated, the
+described in `docs/SELF_LEARNING.md` — the model learns to be calibrated, the
 MCP wrapper makes that calibration available to other systems.

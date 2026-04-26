@@ -182,7 +182,7 @@ def build_prompt_dataset(
         miscalibrated prompt from the replay buffer instead of sampling fresh.
 
         The replay buffer is populated by the reward wrapper after every
-        rollout group (CPR — Pillar 2). See SELF_LEARNING.md §3.
+        rollout group (CPR — Pillar 2). See docs/SELF_LEARNING.md §3.
         """
         if replay_buffer is None or replay_mix <= 0.0:
             return None
@@ -429,7 +429,7 @@ def make_train_time_hindsight_reward(
     *actual* correctness of the answer in the same completion.
 
     This is **not** the full Hindsight Experience Replay protocol (see
-    SELF_LEARNING.md §2.3) — but it does give the model an incentive to
+    docs/SELF_LEARNING.md §2.3) — but it does give the model an incentive to
     emit a hindsight tag aligned with its own correctness, which:
       - trains an internal correctness predictor head
       - acts as a self-distillation regulariser on confidence
@@ -886,7 +886,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Per-domain initial target_difficulty. Defaults to preset value.",
     )
 
-    # ─ Self-learning calibration (SELF_LEARNING.md) ──────────────────────
+    # ─ Self-learning calibration (docs/SELF_LEARNING.md) ─────────────────
     p.add_argument(
         "--hindsight",
         action="store_true",
@@ -1244,7 +1244,7 @@ def main():
         # curriculum + replay + SMC feedback channel. reward_format and
         # reward_accuracy are auxiliary signals (XML compliance + correctness
         # bonus). reward_hindsight (when --hindsight) is the trainer-time
-        # self-prediction head — see SELF_LEARNING.md §2.
+        # self-prediction head — see docs/SELF_LEARNING.md §2.
         reward_funcs=reward_funcs,
         args=grpo_config,
         train_dataset=train_dataset,

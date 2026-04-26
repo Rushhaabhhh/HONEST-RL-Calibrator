@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# run_server.sh — start the HONEST-Env FastAPI server locally for development/testing
+# bin/run_server.sh — start the HONEST-Env FastAPI server locally for development/testing
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$SCRIPT_DIR/venv"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VENV="$PROJECT_ROOT/venv"
 
 if [[ ! -d "$VENV" ]]; then
     echo "ERROR: virtualenv not found at $VENV. Run: python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
@@ -23,7 +24,7 @@ echo "  Metadata: http://localhost:${PORT}/metadata"
 echo "  Schema:   http://localhost:${PORT}/schema"
 echo ""
 
-cd "$SCRIPT_DIR"
+cd "$PROJECT_ROOT"
 exec "$VENV/bin/uvicorn" server.app:app \
     --host "$HOST" \
     --port "$PORT" \

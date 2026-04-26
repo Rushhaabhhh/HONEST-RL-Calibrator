@@ -70,7 +70,7 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/Rushhaabhhh/HONEST-RL-Calibrator"
 Repository = "https://github.com/Rushhaabhhh/HONEST-RL-Calibrator"
-Documentation = "https://github.com/Rushhaabhhh/HONEST-RL-Calibrator/blob/main/RUNBOOK.md"
+Documentation = "https://github.com/Rushhaabhhh/HONEST-RL-Calibrator/blob/main/docs/RUNBOOK.md"
 
 [project.scripts]
 # Server entry point — enables: `uv run --project . server` and `python -m server.app`

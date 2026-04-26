@@ -114,7 +114,7 @@ consistent. We tested two failure modes carefully:
 ### 2.3 Self-learning extensions
 
 Four opt-in pillars turn a fixed-task environment into a **recursive
-skill amplifier**. Full memo: [`SELF_LEARNING.md`](../SELF_LEARNING.md).
+skill amplifier**. Full memo: [`SELF_LEARNING.md`](SELF_LEARNING.md).
 
 | Pillar                                | Flag                | What it adds                                                            |
 | ------------------------------------- | ------------------- | ----------------------------------------------------------------------- |
@@ -146,7 +146,7 @@ Stage 4: Comparison + reliability      eval/compare_runs.py     (~1 min)
 Stage 5: MCP deployment                 mcp_server/              (instant)
 ```
 
-The full operational guide is [`RUNBOOK.md`](../RUNBOOK.md).
+The full operational guide is [`RUNBOOK.md`](RUNBOOK.md).
 
 ### 3.1 GRPO configuration (qwen3b preset)
 

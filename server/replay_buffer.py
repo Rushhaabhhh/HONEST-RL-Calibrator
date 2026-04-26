@@ -15,7 +15,7 @@ We deliberately keep this dependency-free (no sumtree, no torch). For
 buffer sizes ≤ 10K, a linear-time sample over numpy weights is sub-ms and
 removes a non-trivial install path.
 
-See ``SELF_LEARNING.md`` §3 for the design rationale.
+See ``docs/SELF_LEARNING.md`` §3 for the design rationale.
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ class CalibrationPrioritizedReplay:
 
         Used as a guardrail: if entropy collapses (one or two entries
         dominate), the replay mix should be temporarily disabled to avoid
-        overfitting to those prompts. See ``SELF_LEARNING.md`` §9.
+        overfitting to those prompts. See ``docs/SELF_LEARNING.md`` §9.
         """
         if not self._buf:
             return None

@@ -6,7 +6,7 @@ of the session, runs all tests, then tears it down.
 Run manually:
     ./venv/bin/pytest tests/test_client_server.py -v
 Or with a pre-running server:
-    ./run_server.sh &
+    ./bin/run_server.sh &
     sleep 3
     ./venv/bin/pytest tests/test_client_server.py -v
 """

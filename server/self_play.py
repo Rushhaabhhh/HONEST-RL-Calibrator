@@ -5,7 +5,7 @@ PAIRED-style asymmetric self-play where:
   * The **solver** is the policy under training.
   * The generator is rewarded by the solver's calibration error on the
     proposed problem — high calibration error means the generator found a
-    learning-frontier problem (see SELF_LEARNING.md §5).
+    learning-frontier problem (see docs/SELF_LEARNING.md §5).
 
 For v1 we ship a deterministic *stubbed* generator that:
   1. Samples a base problem from the unified sampler.
@@ -80,7 +80,7 @@ class StubProblemGenerator:
     Used as the v1 generator because a learned generator policy would
     need its own RL loop with its own KL-stable schedule. The stub
     captures the same coupling (generator difficulty ↔ solver
-    miscalibration) at a fraction of the compute. See SELF_LEARNING.md §5.2.
+    miscalibration) at a fraction of the compute. See docs/SELF_LEARNING.md §5.2.
     """
 
     name = "stub"
@@ -233,7 +233,7 @@ class SelfPlayLoop:
 
         Used as a guardrail: a stub generator should produce diverse
         problems. If diversity collapses below 0.1 we re-seed it to avoid
-        feeding the solver the same prompt over and over (SELF_LEARNING.md
+        feeding the solver the same prompt over and over (docs/SELF_LEARNING.md
         §9, GSS row).
         """
         if not self.transitions:

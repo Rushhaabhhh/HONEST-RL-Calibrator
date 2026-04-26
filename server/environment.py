@@ -74,7 +74,7 @@ class HonestEnvironment(Environment):
         hindsight_probability:
             Probability of injecting a hindsight slot after each AnswerAction.
             ``0.0`` (default) preserves the legacy behaviour. See
-            ``server.hindsight`` and ``SELF_LEARNING.md §2``.
+            ``server.hindsight`` and ``docs/SELF_LEARNING.md §2``.
         hindsight_weight:
             ``k`` in the hindsight reward ``R_h = -k(r-y)^2``.
         smc:

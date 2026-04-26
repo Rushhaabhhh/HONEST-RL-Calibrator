@@ -12,7 +12,7 @@ All three preserve a verifiable ground truth — RL without grading is
 worthless. The verifier is the same one used by the unified sampler, so
 mutated problems plug into ``server.reward.compute_reward`` unchanged.
 
-See ``SELF_LEARNING.md`` §4 for the design rationale.
+See ``docs/SELF_LEARNING.md`` §4 for the design rationale.
 """
 
 from __future__ import annotations
