@@ -33,7 +33,14 @@ from server.reward import (  # noqa: E402
     parse_action_lenient,
 )
 from server.verifier import verify_mcq                           # noqa: E402
-from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  # noqa: E402
+from eval.metrics import (  # noqa: E402
+    compute_ace,
+    compute_auroc,
+    compute_brier,
+    compute_ece,
+    compute_mce,
+    compute_nll,
+)
 from server.generators import code_gen, logic_gen, math_gen      # noqa: E402
 from calibration_profiles import (  # noqa: E402
     REASONING_MODES,
@@ -161,6 +168,8 @@ def _evaluate_records(records: list) -> dict:
         "ece":             round(compute_ece(confs, corrects), 4),
         "ace":             round(compute_ace(confs, corrects), 4),
         "mce":             round(compute_mce(confs, corrects), 4),
+        "nll":             round(compute_nll(confs, corrects), 4),
+        "auroc":           round(compute_auroc(confs, corrects), 4),
         "n_correct":       len([r for r in answered if r["correct"]]),
         "n_answered":      len(answered),
         "n_malformed":     sum(1 for r in records if r["parsed_type"] == "malformed"),
@@ -215,6 +224,8 @@ def run_indist_eval(
                     confidence = 0.0
 
                 records.append({
+                    "domain":       domain,
+                    "difficulty":   difficulty,
                     "question":     question[:120],
                     "ground_truth": ground_truth,
                     "raw_response": raw[:200],
@@ -305,6 +316,7 @@ def run_ood_eval(
                 reward = -1.0  # MALFORMED_PENALTY, preserves prior semantics
 
             records.append({
+                "domain":       domain,  # "medical" or "legal"
                 "question":     question[:200],
                 "ground_truth": ground_truth,
                 "raw_response": raw[:200],
@@ -389,14 +401,22 @@ def generate_reliability_plots(full_results: dict, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Full HONEST-RL evaluation pipeline")
-    parser.add_argument("--model-id",          type=str,  default="Qwen/Qwen2.5-7B-Instruct")
+    parser.add_argument("--model-id",          type=str,  default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--adapter-path",      type=str,  default=None,
                         help="Path to trained LoRA adapter dir (merged into base model)")
     parser.add_argument("--baseline-results",  type=str,  default="eval/baseline_results.json",
                         help="Existing baseline_results.json for comparison table")
     parser.add_argument("--ood-dir",           type=str,  default="eval/ood")
     parser.add_argument("--output",            type=str,  default="eval/full_results.json")
-    parser.add_argument("--samples",           type=int,  default=20)
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=100,
+        help=(
+            "Samples per (domain, difficulty) condition. Default is 100 for "
+            "fast eval — bump to 200 for the headline comparison report."
+        ),
+    )
     parser.add_argument("--device",            type=str,  default="auto")
     parser.add_argument("--max-new-tokens",    type=int,  default=512)
     parser.add_argument(
@@ -424,7 +444,11 @@ def main():
     if args.dry_run:
         print("DRY-RUN mode (stub responses)\n")
         model, tokenizer = None, None
-        response_fn = lambda m, t, q, **kw: "<answer>A</answer><confidence>0.7</confidence>"
+        # Strict format so the parser accepts and the metric pipeline runs.
+        response_fn = lambda m, t, q, **kw: (  # noqa: E731
+            "<reasoning>Stub reasoning.</reasoning>"
+            "<answer>A</answer><confidence>0.7</confidence>"
+        )
     else:
         model, tokenizer = load_model(args.model_id, args.adapter_path, args.device)
         response_fn = None
@@ -511,15 +535,21 @@ def main():
             "ece":       round(compute_ece(all_confs, all_corrects), 4),
             "ace":       round(compute_ace(all_confs, all_corrects), 4),
             "mce":       round(compute_mce(all_confs, all_corrects), 4),
+            "nll":       round(compute_nll(all_confs, all_corrects), 4),
+            "auroc":     round(compute_auroc(all_confs, all_corrects), 4),
             "accuracy": round((total_correct / total) if total else 0.0, 4),
             "format_rate": round((total_format_valid / total) if total else 0.0, 4),
             "mean_reward": round((sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0, 4),
         }
         o = output["overall"]
-        print(f"\n── Overall ─ n={o['n_samples']}  "
-              f"Acc={o['accuracy']:.1%}  Fmt={o['format_rate']:.1%}  "
-              f"Brier={o['brier']:.4f}  ECE={o['ece']:.4f}  "
-              f"ACE={o['ace']:.4f}  MCE={o['mce']:.4f}  Reward={o['mean_reward']:.4f}")
+        print(
+            f"\n── Overall ─ n={o['n_samples']}  "
+            f"Acc={o['accuracy']:.1%}  Fmt={o['format_rate']:.1%}  "
+            f"Brier={o['brier']:.4f}  ECE={o['ece']:.4f}  "
+            f"ACE={o['ace']:.4f}  MCE={o['mce']:.4f}  "
+            f"NLL={o['nll']:.4f}  AUROC={o['auroc']:.4f}  "
+            f"Reward={o['mean_reward']:.4f}"
+        )
 
     # ── Save ──────────────────────────────────────────────────────────────────
     out_path = Path(args.output)

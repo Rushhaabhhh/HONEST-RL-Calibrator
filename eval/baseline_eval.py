@@ -21,7 +21,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from server.generators import code_gen, logic_gen, math_gen  # noqa: E402
 from server.reward import compute_reward, parse_action  # noqa: E402
-from eval.metrics import compute_brier, compute_ece, compute_ace, compute_mce  # noqa: E402
+from eval.metrics import (  # noqa: E402
+    compute_ace,
+    compute_auroc,
+    compute_brier,
+    compute_ece,
+    compute_mce,
+    compute_nll,
+)
 from calibration_profiles import (  # noqa: E402
     REASONING_MODES,
     SUPPORTED_PRESETS,
@@ -33,10 +40,10 @@ from calibration_profiles import (  # noqa: E402
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 DOMAINS = ["math", "code", "logic"]
 DIFFICULTIES = [1, 2, 3, 4, 5]
-DEFAULT_SAMPLES = 20
+DEFAULT_SAMPLES = 100  # Problems per (domain, difficulty) condition.
 
 GENERATORS = {
     "math": math_gen.generate,
@@ -160,6 +167,8 @@ def evaluate_condition(
             confidence = 0.0  # treat abstain as zero-confidence for calibration
 
         records.append({
+            "domain": domain,
+            "difficulty": difficulty,
             "question": question[:120],
             "ground_truth": ground_truth,
             "raw_response": raw[:200],
@@ -199,6 +208,8 @@ def evaluate_condition(
         "ece": round(compute_ece(confidences_all, correctness_all), 4),
         "ace": round(compute_ace(confidences_all, correctness_all), 4),
         "mce": round(compute_mce(confidences_all, correctness_all), 4),
+        "nll": round(compute_nll(confidences_all, correctness_all), 4),
+        "auroc": round(compute_auroc(confidences_all, correctness_all), 4),
         "n_correct": len(correct_answers),
         "n_answered": len(answered),
         "n_malformed": sum(1 for r in records if r["parsed_type"] == "malformed"),
@@ -273,8 +284,16 @@ def print_summary(conditions: dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Baseline eval for HONEST-RL-Calibrator")
-    parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES,
-                        help="Problems per condition (default: 20)")
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=DEFAULT_SAMPLES,
+        help=(
+            f"Problems per (domain, difficulty) condition. "
+            f"Default is {DEFAULT_SAMPLES} for fast baseline runs — "
+            f"bump to 200 for the headline comparison."
+        ),
+    )
     parser.add_argument("--output", type=str, default="eval/baseline_results.json",
                         help="Output JSON path")
     parser.add_argument("--device", type=str, default="auto",
@@ -309,9 +328,14 @@ def main():
     system_prompt, user_template = prompt_templates(args.reasoning_mode)
 
     if args.dry_run:
-        print("DRY-RUN mode: using stub response fn (correct format, fixed answer).\n")
+        print("DRY-RUN mode: using stub response fn (strict format, fixed answer).\n")
         model, tokenizer = None, None
-        response_fn = lambda m, t, q, **kw: "<answer>42</answer><confidence>0.7</confidence>"  # noqa: E731
+        # Strict-format stub so the strict parser accepts the output and the
+        # full metric pipeline (incl. NLL/AUROC) gets a real value to crunch.
+        response_fn = lambda m, t, q, **kw: (  # noqa: E731
+            "<reasoning>Stub reasoning.</reasoning>"
+            "<answer>42</answer><confidence>0.7</confidence>"
+        )
     else:
         model, tokenizer = load_model(eval_model_id, args.device)
         response_fn = None  # use real generate_response
@@ -364,6 +388,8 @@ def main():
         "ace": round(compute_ace(all_confidences, all_correctness), 4),
         "mce": round(compute_mce(all_confidences, all_correctness), 4),
         "brier": round(compute_brier(all_confidences, all_correctness), 4),
+        "nll": round(compute_nll(all_confidences, all_correctness), 4),
+        "auroc": round(compute_auroc(all_confidences, all_correctness), 4),
         "mean_reward": round((sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0, 4),
         "n_answered": len(all_confidences),
         "n_total": total_samples,
@@ -391,7 +417,12 @@ def main():
     print(f"\nResults saved to {out_path}\n")
 
     print_summary(conditions)
-    print(f"\nOverall: accuracy={overall['accuracy']:.1%}  ECE={overall['ece']:.4f}  Brier={overall['brier']:.4f}  Reward={overall['mean_reward']:.3f}")
+    print(
+        f"\nOverall: accuracy={overall['accuracy']:.1%}  "
+        f"ECE={overall['ece']:.4f}  Brier={overall['brier']:.4f}  "
+        f"NLL={overall['nll']:.4f}  AUROC={overall['auroc']:.4f}  "
+        f"Reward={overall['mean_reward']:.3f}"
+    )
 
 
 if __name__ == "__main__":

@@ -296,10 +296,38 @@ def plot_overall(
 # Comparison: before vs after RL/SFT
 # ---------------------------------------------------------------------------
 
+def _collect_conditions_any_schema(results: dict) -> dict:
+    """Return a flat ``{condition_key: condition_dict}`` regardless of which
+    schema the JSON uses.
+
+    Supported shapes:
+      * ``baseline_eval.py`` → ``{"conditions": {"math_1": {...}, ...}}``
+      * ``full_eval.py``     → ``{"in_distribution": {...}, "ood": {...}}``
+                              (each value is a ``{condition_key: cond}`` map)
+
+    Keys from in-distribution conditions stay verbatim
+    (``math_1`` / ``code_3`` / …); OOD condition keys are prefixed with
+    ``ood_`` so they don't collide with the math/code/logic namespace.
+    """
+    out: dict = {}
+    if isinstance(results.get("conditions"), dict):
+        out.update(results["conditions"])
+
+    if isinstance(results.get("in_distribution"), dict):
+        out.update(results["in_distribution"])
+
+    if isinstance(results.get("ood"), dict):
+        for k, v in results["ood"].items():
+            out[f"ood_{k}"] = v
+
+    return out
+
+
 def plot_comparison(
     before_path: str,
     after_path: str,
     out_dir: Optional[str] = None,
+    output_path: Optional[str] = None,
     label_before: str = "Before Training",
     label_after: str = "After Training",
 ):
@@ -307,9 +335,19 @@ def plot_comparison(
     Generate side-by-side overall reliability diagrams from two result JSON files.
     Typically called after RL training to visualise improvement.
 
-    Example:
-        from eval.plot_reliability import plot_comparison
-        plot_comparison("eval/baseline_results.json", "eval/after_rl_results.json")
+    Robust to both ``baseline_results.json`` (top-level ``conditions``) and
+    ``full_results.json`` (top-level ``in_distribution`` + ``ood``) schemas —
+    samples from any/all sections are aggregated for the diagram.
+
+    Args:
+        before_path: Baseline JSON.
+        after_path:  Trained JSON.
+        out_dir:     Optional directory; ignored if ``output_path`` is given.
+        output_path: Explicit PNG path. Takes precedence over ``out_dir``.
+        label_before/label_after: Panel titles.
+
+    Returns:
+        str: Path of the saved PNG.
     """
     with open(before_path) as f:
         before = json.load(f)
@@ -318,7 +356,7 @@ def plot_comparison(
 
     def _collect(results):
         confs, corrs = [], []
-        for cond in results["conditions"].values():
+        for cond in _collect_conditions_any_schema(results).values():
             cf, cr = extract_pairs(cond.get("samples", []))
             confs.extend(cf)
             corrs.extend(cr)
@@ -348,9 +386,14 @@ def plot_comparison(
     )
     fig.tight_layout()
 
-    _out_dir = Path(out_dir) if out_dir else Path(before_path).parent / "plots"
-    _out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = _out_dir / "comparison.png"
+    if output_path is not None:
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        _out_dir = Path(out_dir) if out_dir else Path(before_path).parent / "plots"
+        _out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = _out_dir / "comparison.png"
+
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Comparison plot saved to {out_path}")
@@ -387,7 +430,11 @@ def main():
     with open(results_path) as f:
         data = json.load(f)
 
-    conditions = data["conditions"]
+    conditions = _collect_conditions_any_schema(data)
+    if not conditions:
+        print(f"ERROR: {results_path} has no `conditions`, `in_distribution`, "
+              f"or `ood` sections to plot.")
+        return
     overall    = data.get("overall", {})
     out_dir    = Path(args.out_dir)
 

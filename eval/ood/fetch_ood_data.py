@@ -1,18 +1,23 @@
 """Fetch OOD evaluation data from HuggingFace datasets.
 
-Downloads two small slices (~50 Q&A pairs each) from publicly available
-HuggingFace datasets:
+Downloads two slices from publicly available HuggingFace datasets:
   - Medical: MMLU professional_medicine subset
+              (used as a redistributable substitute for MedQA, whose
+              license is not freely redistributable on HuggingFace; the
+              physician-licensing slice is a same-domain proxy).
   - Legal:   AGIEval LSAT-LR (logical reasoning) subset
 
-Outputs:
-  eval/ood/medqa_sample.jsonl   — 50 medical MCQ pairs
-  eval/ood/lsat_sample.jsonl    — 50 LSAT logical-reasoning MCQ pairs
+Outputs (default `--n 200`, the standard OOD evaluation sample count):
+  eval/ood/medqa_sample.jsonl   — N medical MCQ pairs
+  eval/ood/lsat_sample.jsonl    — N LSAT logical-reasoning MCQ pairs
+
+Note: MMLU professional_medicine validation has only ~149 questions, so for
+n>149 the medical file will silently be capped at the source's max size.
 
 Each line: {"question": str, "answer": str, "domain": "medical"|"legal", "source": str}
 
 Usage:
-    python eval/ood/fetch_ood_data.py
+    python eval/ood/fetch_ood_data.py                # 200 each (spec default)
     python eval/ood/fetch_ood_data.py --n 100 --seed 99
 """
 
@@ -168,7 +173,9 @@ def write_jsonl(records: list[dict], path: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch OOD evaluation data")
-    parser.add_argument("--n",    type=int, default=50, help="Samples per domain")
+    parser.add_argument("--n",    type=int, default=200,
+                        help="Samples per OOD domain (default 200; "
+                             "medical may be capped by MMLU validation size)")
     parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
     parser.add_argument("--out-dir", type=str, default=str(Path(__file__).parent),
                         help="Output directory for jsonl files")

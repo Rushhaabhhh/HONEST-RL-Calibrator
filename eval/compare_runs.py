@@ -35,9 +35,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from eval.metrics import (  # noqa: E402
     compute_ace,
+    compute_auroc,
     compute_brier,
     compute_ece,
     compute_mce,
+    compute_nll,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,8 +56,8 @@ def _bootstrap_brier_ci(
     """95% bootstrap confidence interval for Brier score.
 
     Cheap (≤ 500 resamples × O(N)) and avoids needing scipy. Used to flag
-    whether a Brier delta is statistically meaningful at hackathon
-    sample sizes (N≈100–500).
+    whether a Brier delta is statistically meaningful at typical
+    evaluation sample sizes (N ≈ 100 - 500).
     """
     import random
     n = len(confidences)
@@ -151,6 +153,8 @@ def _summary(samples: List[Dict]) -> Dict[str, float]:
         "ece":           compute_ece(confs, corrects),
         "ace":           compute_ace(confs, corrects),
         "mce":           compute_mce(confs, corrects),
+        "nll":           compute_nll(confs, corrects),
+        "auroc":         compute_auroc(confs, corrects),
         "brier_ci_lo":   brier_lo,
         "brier_ci_hi":   brier_hi,
     }
@@ -250,6 +254,8 @@ def render_report(baseline: Dict[str, Any], after: Dict[str, Any]) -> str:
     out.append(_delta_line("ECE        (↓)",     bs["ece"],       af["ece"]))
     out.append(_delta_line("ACE        (↓)",     bs["ace"],       af["ace"]))
     out.append(_delta_line("MCE        (↓)",     bs["mce"],       af["mce"]))
+    out.append(_delta_line("NLL        (↓)",     bs["nll"],       af["nll"]))
+    out.append(_delta_line("AUROC      (↑)",     bs["auroc"],     af["auroc"], lower_better=False))
     out.append(_delta_line("Accuracy   (↑)",     bs["accuracy"],  af["accuracy"], lower_better=False, fmt="{:.1%}"))
     out.append(_delta_line("Format OK  (↑)",     bs["format_rate"], af["format_rate"], lower_better=False, fmt="{:.1%}"))
     out.append(_delta_line("MeanConf   (—)",     bs["mean_conf"], af["mean_conf"], lower_better=False))
@@ -291,16 +297,22 @@ def render_report(baseline: Dict[str, Any], after: Dict[str, Any]) -> str:
     if indist_after or ood_after:
         out.append("## 3. In-Distribution vs OOD (after training)")
         out.append("")
-        out.append("| Section          |  N  |  Brier  |   ECE   |   ACE   |   MCE   |  Acc  |")
-        out.append("|------------------|----:|--------:|--------:|--------:|--------:|------:|")
+        out.append("| Section          |  N  |  Brier  |   ECE   |   ACE   |   MCE   |   NLL   |  AUROC  |  Acc  |")
+        out.append("|------------------|----:|--------:|--------:|--------:|--------:|--------:|--------:|------:|")
         if indist_after:
             o = indist_after
-            out.append(f"| In-distribution  | {o['n']:>3} | {o['brier']:.4f} | {o['ece']:.4f} | "
-                       f"{o['ace']:.4f} | {o['mce']:.4f} | {o['accuracy']:.1%} |")
+            out.append(
+                f"| In-distribution  | {o['n']:>3} | {o['brier']:.4f} | {o['ece']:.4f} | "
+                f"{o['ace']:.4f} | {o['mce']:.4f} | {o['nll']:.4f} | {o['auroc']:.4f} | "
+                f"{o['accuracy']:.1%} |"
+            )
         if ood_after:
             o = ood_after
-            out.append(f"| OOD              | {o['n']:>3} | {o['brier']:.4f} | {o['ece']:.4f} | "
-                       f"{o['ace']:.4f} | {o['mce']:.4f} | {o['accuracy']:.1%} |")
+            out.append(
+                f"| OOD              | {o['n']:>3} | {o['brier']:.4f} | {o['ece']:.4f} | "
+                f"{o['ace']:.4f} | {o['mce']:.4f} | {o['nll']:.4f} | {o['auroc']:.4f} | "
+                f"{o['accuracy']:.1%} |"
+            )
         if indist_after and ood_after:
             gap = ood_after["brier"] - indist_after["brier"]
             note = "good (small gap)" if gap < 0.05 else \
@@ -354,6 +366,11 @@ def main():
     ap.add_argument("--after",    type=str, default="eval/full_results.json")
     ap.add_argument("--output",   type=str, default=None,
                     help="Optional markdown file path. Defaults to stdout only.")
+    ap.add_argument("--plot",     action="store_true",
+                    help="Also render side-by-side reliability diagrams via "
+                         "eval/plot_reliability.py.")
+    ap.add_argument("--plot-output", type=str, default=None,
+                    help="PNG path for the reliability diagram (used with --plot).")
     args = ap.parse_args()
 
     bp = Path(args.baseline)
@@ -374,6 +391,20 @@ def main():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(report)
         print(f"\nReport written -> {out_path}", file=sys.stderr)
+
+    if args.plot:
+        try:
+            from eval.plot_reliability import plot_comparison
+            png_path = plot_comparison(
+                str(bp),
+                str(ap_),
+                output_path=args.plot_output,
+                label_before="Before GRPO",
+                label_after="After GRPO",
+            )
+            print(f"Reliability diagram written -> {png_path}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 — plot failure is non-fatal
+            print(f"(reliability plot skipped: {exc})", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -123,3 +123,83 @@ def compute_mce(
     if not gaps:
         return float("nan")
     return float(max(gaps))
+
+
+# ---------------------------------------------------------------------------
+# Likelihood + discrimination metrics (NLL, AUROC, AUPRC)
+# ---------------------------------------------------------------------------
+
+# NLL is unbounded as confidences approach 0 or 1. We clip to a tiny epsilon
+# band before taking the log so a single mis-clipped 0.0 doesn't blow the
+# whole batch to +inf. 1e-7 is conservative — at conf=1e-7 the NLL term is
+# ~16 nats, large but finite.
+_NLL_EPS = 1e-7
+
+
+def compute_nll(confidences: list, correctness: list) -> float:
+    """Negative Log Likelihood — standard calibration paper metric.
+
+        NLL = -mean( y * log(p) + (1-y) * log(1-p) )
+
+    Lower is better. Unbounded above (clipped via _NLL_EPS so a single 0/1
+    confidence cannot poison the average). Returns NaN for empty input.
+
+    Note: NLL and Brier rank similarly on most distributions, but NLL is more
+    sensitive to extreme over/under-confidence on a few examples — useful as
+    a *worst-case* signal alongside ECE/MCE.
+    """
+    c = np.asarray(confidences, dtype=float)
+    o = np.asarray(correctness, dtype=float)
+    if len(c) == 0:
+        return float("nan")
+    p = np.clip(c, _NLL_EPS, 1.0 - _NLL_EPS)
+    return float(-np.mean(o * np.log(p) + (1.0 - o) * np.log(1.0 - p)))
+
+
+def compute_auroc(confidences: list, correctness: list) -> float:
+    """Area Under ROC Curve, using confidence as the score for distinguishing
+    correct (positive) from incorrect (negative).
+
+    Range [0, 1]. 0.5 = random, 1.0 = perfect discrimination.
+
+    Distinct from calibration: a model can have AUROC=0.9 (it can rank correct
+    > incorrect well) yet ECE=0.2 (the absolute confidences are in the wrong
+    range). Both signals are informative.
+
+    Implementation uses the rank-sum (Mann–Whitney U) identity to avoid pulling
+    in scikit-learn:
+
+        AUROC = (R_pos - n_pos*(n_pos+1)/2) / (n_pos * n_neg)
+
+    where R_pos is the sum of ranks of the positive class. Ties are split via
+    average ranks (numpy argsort + average-tie ranking).
+
+    Returns NaN if either class is empty (one-class AUROC is undefined).
+    """
+    c = np.asarray(confidences, dtype=float)
+    o = np.asarray(correctness, dtype=int)
+    if len(c) == 0:
+        return float("nan")
+    n_pos = int((o == 1).sum())
+    n_neg = int((o == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    # Average-tie ranking: rank with ties broken by averaging.
+    order = np.argsort(c, kind="mergesort")
+    ranks = np.empty_like(order, dtype=float)
+    n = len(c)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and c[order[j + 1]] == c[order[i]]:
+            j += 1
+        # ranks i..j (inclusive) are tied — assign average rank (1-based).
+        avg_rank = 0.5 * ((i + 1) + (j + 1))
+        ranks[order[i:j + 1]] = avg_rank
+        i = j + 1
+
+    r_pos = float(ranks[o == 1].sum())
+    auroc = (r_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auroc)
+

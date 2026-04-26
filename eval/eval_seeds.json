@@ -1,0 +1,39 @@
+{
+  "_doc": "Reproducibility seeds for evaluation (consumed by eval/baseline_eval.py and eval/full_eval.py).",
+  "_doc_2": "Both baseline_eval.py and full_eval.py derive their per-sample seed as `(difficulty * 1000) + i` so that a given (domain, difficulty, sample-index) yields the same procedural problem on every machine. This file pins the *base* seeds + sample counts those scripts use for the public evaluation snapshot, so anyone can rerun and exactly reproduce the numbers in the comparison report.",
+
+  "indist": {
+    "domains":      ["math", "code", "logic"],
+    "difficulties": [1, 2, 3, 4, 5],
+    "samples_per_condition": 20,
+    "seed_formula": "(difficulty * 1000) + i",
+    "samples_per_difficulty": [
+      {"difficulty": 1, "seeds": "1000..1019"},
+      {"difficulty": 2, "seeds": "2000..2019"},
+      {"difficulty": 3, "seeds": "3000..3019"},
+      {"difficulty": 4, "seeds": "4000..4019"},
+      {"difficulty": 5, "seeds": "5000..5019"}
+    ]
+  },
+
+  "ood": {
+    "datasets": {
+      "medical": "cais/mmlu :: professional_medicine :: validation",
+      "legal":   "dmayhem93/agieval-lsat-lr :: test (fallback: hails/agieval-lsat-lr or cais/mmlu :: professional_law :: test)"
+    },
+    "shuffle_seed": 42,
+    "samples_per_domain": 200,
+    "fetch_command": "python eval/ood/fetch_ood_data.py --n 200 --seed 42"
+  },
+
+  "format_sft": {
+    "rng_seed": 42,
+    "n_examples": 500,
+    "seed_formula_for_generators": "800000 + attempt_index"
+  },
+
+  "notes": [
+    "Increasing samples_per_condition is safe: seeds 1000..1019 are a *subset* of 1000..1099, so existing reports remain comparable.",
+    "Changing the seed formula will silently invalidate prior comparisons — if you ever need to, change the field name (e.g. `seed_formula_v2`) and bump the result-file schema."
+  ]
+}
