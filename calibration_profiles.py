@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
-SUPPORTED_PRESETS = ("qwen3b", "llama3b", "phi4mini")
+SUPPORTED_PRESETS = ("qwen1.5b", "qwen3b", "llama3b", "phi4mini")
 REASONING_MODES = ("required",)
 
 
@@ -82,6 +82,39 @@ class CalibrationPreset:
 
 
 MODEL_PRESETS: Dict[str, CalibrationPreset] = {
+    # ─────────────────────────────────────────────────────────────────────
+    # Qwen2.5-1.5B-Instruct  →  T4 16 GB / L4 24 GB / A100 (fits in bf16
+    # without quantization). Iteration-tier preset: ~50 min for 250 steps
+    # on A100 80 GB, lets the operator run 3-4 reward-shape sweeps in the
+    # time budget of a single 3B run. Smaller policy is noisier per
+    # rollout, so G is bumped to 12 (vs 10 at 3B) to stabilize advantage
+    # normalization. lr lifted to 3e-6 — small Qwen models tolerate
+    # steeper updates and the noisier reward needs a bigger gradient to
+    # cut through. beta starts a touch tighter (0.05 vs 0.04) because
+    # 1.5B's policy drifts faster early; relaxes on the same 50 % cadence.
+    # Difficulty mixture leans easier (more 1-2, less 4-5) since the
+    # base model can't reliably solve 4-5 — running there just adds
+    # reward noise, not calibration signal.
+    # ─────────────────────────────────────────────────────────────────────
+    "qwen1.5b": CalibrationPreset(
+        name="qwen1.5b",
+        model_hint="Qwen/Qwen2.5-1.5B-Instruct",
+        domain_weights={"math": 0.50, "code": 0.30, "logic": 0.20},
+        difficulty_weights={1: 0.35, 2: 0.35, 3: 0.20, 4: 0.07, 5: 0.03},
+        default_prompt_dataset_size=2500,
+        default_num_generations=12,
+        default_max_completion_length=384,
+        default_temperature=0.85,
+        default_learning_rate=3.0e-6,
+        default_beta=0.05,
+        default_lora_r=32,
+        default_max_steps=250,
+        reward_format_weight=1.0,
+        reward_accuracy_weight=1.0,
+        beta_end=0.02,
+        kl_relax_frac=0.50,
+        default_initial_target=1,
+    ),
     # ─────────────────────────────────────────────────────────────────────
     # Qwen2.5-3B-Instruct  →  L4 24 GB (recommended) / A10G 24 GB
     # Strong reasoning per parameter (~50-55 % acc on diff-2/3) but rollouts
@@ -178,6 +211,8 @@ MODEL_PRESETS: Dict[str, CalibrationPreset] = {
 def infer_preset_name(model_id: str) -> str:
     """Infer preset from model id; defaults to qwen3b for unknown ids."""
     m = (model_id or "").lower()
+    if "qwen" in m and ("1.5b" in m or "1_5b" in m):
+        return "qwen1.5b"
     if "qwen" in m and "3b" in m:
         return "qwen3b"
     if "llama" in m and "3b" in m:
