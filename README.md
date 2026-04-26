@@ -248,7 +248,7 @@ for the full research memo.
 
 | Pillar                                | Flag                  | What it adds                                                        |
 | ------------------------------------- | --------------------- | ------------------------------------------------------------------- |
-| Hindsight Calibration Reward (HCR)    | `--hindsight`         | Retrospective confidence head trained as auxiliary reward.          |
+| Hindsight Calibration Reward (HCR)    | `--hindsight`         | Retrospective confidence head. Two modes: `legacy` (default) grades a `<hindsight>` tag with `-k(r-y)²`; `refined` (`--hindsight-mode refined`) uses Calibration-Aware Self-Refinement — model critiques its own answer and refines confidence. See [`docs/SELF_LEARNING.md` §2.5](docs/SELF_LEARNING.md#25-v2--calibration-aware-self-refinement-casr). |
 | Calibration-Prioritized Replay (CPR)  | `--replay-priority`   | Re-sample miscalibrated prompts (PER on `\|c−y\|`).                 |
 | Self-Mutating Curriculum (SMC)        | `--self-mutate`       | Extend ceiling above d=5 via deterministic problem mutators.        |
 | Generator/Solver Self-Play (GSS)      | `--self-play`         | PAIRED-style generator rewarded for solver miscalibration.          |

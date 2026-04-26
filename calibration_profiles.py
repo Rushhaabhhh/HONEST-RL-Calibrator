@@ -13,7 +13,13 @@ from typing import Dict, List, Optional
 
 
 SUPPORTED_PRESETS = ("qwen0.5b", "qwen1.5b", "qwen3b", "llama1b", "llama3b", "phi4mini")
-REASONING_MODES = ("required",)
+# "required": baseline 3-tag protocol (reasoning + answer + confidence).
+# "refined":  Calibration-Aware Self-Refinement protocol — adds a critique
+#             slot and a refined_confidence slot the model uses to revise its
+#             first-pass confidence after self-critiquing. Pairs with
+#             ``--hindsight-mode refined`` in the trainer; see
+#             docs/SELF_LEARNING.md §2.5 for the design rationale.
+REASONING_MODES = ("required", "refined")
 
 
 @dataclass(frozen=True)
@@ -336,14 +342,7 @@ def parse_difficulty_csv(csv_text: Optional[str]) -> Optional[Dict[int, float]]:
     return {int(k): v for k, v in parsed.items()}
 
 
-def prompt_templates(reasoning_mode: str) -> tuple[str, str]:
-    """Return (system_prompt, user_template) for selected reasoning mode."""
-    mode = (reasoning_mode or "required").lower()
-    if mode not in REASONING_MODES:
-        valid = ", ".join(REASONING_MODES)
-        raise ValueError(f"Invalid reasoning_mode '{reasoning_mode}'. Valid: {valid}")
-
-    system_prompt = """You are a precise and well-calibrated AI assistant.
+_REQUIRED_SYSTEM_PROMPT = """You are a precise and well-calibrated AI assistant.
 
 Respond in EXACTLY this format:
 <reasoning>
@@ -356,8 +355,84 @@ Rules:
 - Confidence must be between 0.0 and 1.0
 - If very unsure, output <abstain/>
 - Keep reasoning concise, then provide final answer and confidence."""
-    user_template = (
-        "{question}\n\n"
-        "Think briefly in <reasoning>, then provide <answer> and <confidence>."
-    )
-    return system_prompt, user_template
+
+_REQUIRED_USER_TEMPLATE = (
+    "{question}\n\n"
+    "Think briefly in <reasoning>, then provide <answer> and <confidence>."
+)
+
+
+# The "refined" prompt teaches the four-tag Calibration-Aware Self-Refinement
+# protocol. The two-stage example (one wrong → reduces confidence, one right
+# → bumps confidence) is critical: it shows the model that <refined_confidence>
+# can move in *either* direction after a critique. Earlier prompt drafts that
+# only showed the "lower the confidence" example caused the model to collapse
+# to always lowering confidence, hurting calibration on correct answers.
+_REFINED_SYSTEM_PROMPT = """You are a precise, well-calibrated AI assistant that critiques its own work.
+
+Respond in EXACTLY this format (all five tags required):
+<reasoning>
+Solve the problem step by step.
+</reasoning>
+<answer>YOUR_ANSWER_HERE</answer>
+<confidence>0.X</confidence>
+<critique>
+Re-read your reasoning above and explicitly look for arithmetic slips, logical
+gaps, or missing cases. State concretely what (if anything) is uncertain.
+</critique>
+<refined_confidence>0.X</refined_confidence>
+
+Rules:
+- Both <confidence> and <refined_confidence> must be in [0.0, 1.0].
+- <refined_confidence> should be DIFFERENT from <confidence> when your critique
+  uncovers something — raise it if you re-verified the answer, lower it if you
+  spotted a possible error. Trivially copying the same number is discouraged.
+- The critique must be substantive (at least one full sentence of self-review).
+- If you are extremely uncertain even after critique, you may output <abstain/>
+  *instead of* the answer/confidence/critique block.
+
+Worked example (wrong answer, confidence drops):
+<reasoning>
+3 + 4 = 8.
+</reasoning>
+<answer>8</answer>
+<confidence>0.85</confidence>
+<critique>
+Re-checking: 3 + 4 is actually 7, not 8. I made an arithmetic slip.
+</critique>
+<refined_confidence>0.05</refined_confidence>
+
+Worked example (correct answer, confidence rises):
+<reasoning>
+A circle has area πr². With r=2, area = 4π ≈ 12.566.
+</reasoning>
+<answer>12.566</answer>
+<confidence>0.6</confidence>
+<critique>
+The formula πr² is correct; 2² = 4 and π ≈ 3.14159, so 4π ≈ 12.566 is right.
+</critique>
+<refined_confidence>0.95</refined_confidence>"""
+
+_REFINED_USER_TEMPLATE = (
+    "{question}\n\n"
+    "Solve in <reasoning>, give <answer> and a first-pass <confidence>. "
+    "Then write a substantive <critique> of your own reasoning and emit a "
+    "<refined_confidence> that reflects what the critique found."
+)
+
+
+def prompt_templates(reasoning_mode: str) -> tuple[str, str]:
+    """Return (system_prompt, user_template) for selected reasoning mode.
+
+    "required": 3-tag baseline protocol (reasoning, answer, confidence).
+    "refined":  5-tag Calibration-Aware Self-Refinement protocol. Pairs
+                with the ``server.hindsight_v2.make_refinement_reward``
+                head and the ``--hindsight-mode refined`` trainer flag.
+    """
+    mode = (reasoning_mode or "required").lower()
+    if mode not in REASONING_MODES:
+        valid = ", ".join(REASONING_MODES)
+        raise ValueError(f"Invalid reasoning_mode '{reasoning_mode}'. Valid: {valid}")
+    if mode == "refined":
+        return _REFINED_SYSTEM_PROMPT, _REFINED_USER_TEMPLATE
+    return _REQUIRED_SYSTEM_PROMPT, _REQUIRED_USER_TEMPLATE

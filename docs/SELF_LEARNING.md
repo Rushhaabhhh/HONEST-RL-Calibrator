@@ -109,6 +109,135 @@ HindsightAction, so it adds no noise to forward-only training. Weighting
 defaults to `0.3` (auxiliary reward, intentionally smaller than the
 primary Brier signal so it shapes behaviour without dominating it).
 
+### 2.5 v2 — Calibration-Aware Self-Refinement (CASR)
+
+> Status: shipped in `server.hindsight_v2`, opt-in via `--hindsight-mode refined`.
+> The legacy v1 head from §2.1–§2.4 is preserved for reproducibility and stays
+> the default.
+
+#### Why v2 exists — diagnosing the v1 silent channel
+
+In the v1 design above, the trainer-time hindsight reward
+(`make_train_time_hindsight_reward` in `training.train_grpo`) returns
+`-k(r-y)²` when the completion contains a `<hindsight>` tag, and `0.0`
+otherwise. We observed in the Qwen-1.5B run (350 GRPO steps) that this
+reward channel was **identically zero on every step** —
+`bin/audit_hindsight.py` confirms this empirically. Three independent root
+causes compound:
+
+1. **The system prompt never describes `<hindsight>`.** The base model has
+   zero prior on the tag and never emits it, so `parse_hindsight()` falls
+   through to "malformed" on 100 % of completions.
+2. **The reward gates AND, with no positive gradient toward the tag.**
+   The reward is `-k(r-y)² ≤ 0` — emitting hindsight can only *cost*
+   reward, never earn it. There is no incentive structure that pulls
+   the policy toward producing the tag in the first place. Chicken-and-egg.
+3. **The design is informationally redundant with Brier.** Inside one
+   completion, `c` and `r` are emitted from the same context window and
+   graded against the same `y` with the same scoring rule. The optimal
+   policy under both rewards combined is `c = r = E[y|x]` — *identical*
+   to the optimal policy under Brier alone. No new information enters
+   the gradient. Compare to true HER (Andrychowicz 2017), where
+   re-labelling injects new information from the realised outcome.
+
+#### v2 design — reward refinement, not retrospection
+
+Instead of asking for a redundant retrospective number, CASR asks the
+model to do something genuinely useful in a single pass: **critique its
+own answer and refine the confidence**. The completion now contains
+five tags:
+
+```
+<reasoning>...</reasoning>
+<answer>X</answer>
+<confidence>c</confidence>
+<critique>spot any errors in the reasoning above</critique>
+<refined_confidence>r</refined_confidence>
+```
+
+The reward decomposes into four terms with carefully designed gradients:
+
+$$R_h = \alpha \cdot \underbrace{[(c-y)^2 - (r-y)^2]}_{\Delta\text{Brier}} \;+\; \beta \cdot \mathbb{1}[\text{critique}_{\text{ok}}] \;-\; \gamma \cdot \mathbb{1}[r \approx c] \;-\; \delta \cdot \mathbb{1}[\text{partial}]$$
+
+with defaults `α=1.0, β=0.05, γ=0.05, δ=0.05`, the final scalar clipped
+to `±0.30` so the head cannot dominate the primary Brier signal.
+
+| Term | Triggers when … | Why it's needed |
+| ---- | --------------- | --------------- |
+| `α·ΔBrier` | full structure + graded answer | Core gradient. POSITIVE iff the refinement actually improved calibration. |
+| `+β` (format bonus) | non-trivial critique present (≥16 chars) | Provides the *positive* gradient that v1 was missing — pulls the policy toward emitting the new tags from cold start. |
+| `−γ` (anti-copy) | `\|r-c\| < 0.02` | Prevents the trivial-copy exploit (set `r=c` and farm β with no real refinement). |
+| `−δ` (partial structure) | critique XOR refined_confidence | Forces the model to commit to the protocol; emits both or neither. |
+
+**Why this provides signal Brier alone cannot:**
+
+- *Already-calibrated case:* `ΔBrier ≈ 0` and the anti-copy penalty fires
+  ⇒ reward goes to 0. No double-counting on Brier-optimal completions.
+- *Mis-calibrated case:* refining `r` toward `y` after critique gives
+  positive `ΔBrier`. The gradient flows *through the critique trace* —
+  the model learns *which patterns of critique correlate with successful
+  re-calibration*, not just final numbers.
+- *Wasted-step case (zero-σ groups):* when GRPO rollouts agree on `(c, y)`,
+  group-relative advantage on Brier collapses. But if 2/4 rollouts emit a
+  critique and 2/4 don't, the format bonus produces non-zero advantage —
+  recovering signal that the primary reward loses.
+
+#### Research grounding
+
+CASR combines four lines of recent work, none of which addresses
+calibration directly but each of which contributes a piece:
+
+| Paper | Year | Contribution |
+| ---- | --- | ------------ |
+| Self-Refine (Madaan et al., NeurIPS) | 2023 | Iterative self-critique improves single-pass LLM outputs. |
+| Self-Verification (Weng et al., EMNLP) | 2023 | Asking the model to verify its own answer reduces hallucination AND improves calibration. |
+| Process Reward Models (Cobbe et al.) | 2021 | Step-level verification correlates strongly with outcome correctness — a critique step is a learnable signal. |
+| Reflexion (Shinn et al., NeurIPS) | 2023 | Verbal self-reflection beats next-token prediction alone for sequential decision making. |
+| HER (Andrychowicz et al., NeurIPS) | 2017 | The original idea that hindsight relabelling injects new information into the gradient. CASR's "new information" is the model's own critique, not an exogenous goal-relabel. |
+
+#### Predicted impact on each metric
+
+| Metric | Mechanism |
+| ------ | --------- |
+| **ECE / Brier ↓** | `ΔBrier` is *literally* the calibration-error-improvement signal — a direct optimisation target on the same scoring rule as the primary reward, but conditional on a strictly larger info set (the critique). |
+| **Wasted steps (σ_R=0) ↓** | Format bonus produces non-zero group advantage when rollouts agree on `(c, y)` but differ on critique emission. New gradient channel. |
+| **Format compliance ↑** | Structural bonus generalises: a model rewarded for cleanly emitting *new* tags gets pulled toward cleanly emitting *all* tags. |
+| **Logic / hard-domain accuracy ↑** | Self-Refine and Reflexion show critique steps measurably improve reasoning on multi-step problems — exactly the domain where the v1 run saw 0% logic accuracy. |
+
+#### How to enable
+
+```bash
+python training/train_grpo.py \
+    --model-id Qwen/Qwen2.5-1.5B-Instruct \
+    --hindsight \
+    --hindsight-mode refined          # ← the new flag, default = "legacy"
+    # reasoning_mode is auto-promoted to "refined" so the prompt teaches
+    # the <critique> and <refined_confidence> tags. No other flags change.
+```
+
+Key invariants:
+
+- `--hindsight-mode legacy` (the default) is **bit-for-bit identical** to
+  the v1 path — in-flight runs see no behavioural change.
+- `--hindsight-mode refined` auto-switches `--reasoning-mode refined` so
+  the system prompt actually describes the new tags. Setting both
+  explicitly is fine (no double-promotion).
+- The CASR reward is silent (returns `0.0`) on completions that emit no
+  refinement structure, so during early training when the model is still
+  learning the new tags, the head adds zero noise to standard rollouts.
+
+#### How to verify hindsight is firing in any run
+
+```bash
+python bin/audit_hindsight.py --trainer-state ./honest-qwen-1-5b-grpo/trainer_state.json
+```
+
+Output reports the fraction of steps the hindsight head returned non-zero.
+On the legacy v1 run with `reasoning_mode=required`, this is ~100 % zero
+(silent channel). On a CASR run with `reasoning_mode=refined`, expect
+non-zero on most steps within ~50 GRPO steps of cold start (the format
+bonus drives initial emission of the new tags).
+
 ---
 
 ## 3. Pillar 2 — Calibration-Prioritized Replay (CPR)

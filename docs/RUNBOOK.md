@@ -217,6 +217,37 @@ healthy GRPO run:
 | `replay/buffer_size`               | rises to ~ buffer_size after warmup|
 | `replay/priority_entropy`          | > 1.0 (else replay disables itself)|
 
+### 3d.1 · Audit whether hindsight is firing
+
+If you are using `--hindsight`, verify the head is *actually contributing
+signal* — the legacy v1 head can be silently zero on every step when
+`reasoning_mode` does not teach the `<hindsight>` tag. After the run:
+
+```bash
+./venv/bin/python bin/audit_hindsight.py \
+    --trainer-state ./honest-qwen-1-5b-grpo/trainer_state.json
+```
+
+The script reports:
+
+* The fraction of steps where the hindsight reward channel was exactly 0
+  (= the model never emitted a parseable hindsight tag in that step's group).
+* The non-zero magnitude (compared against Brier as a sanity ratio).
+* A verdict: "structurally silent" / "intermittent" / "healthy".
+
+If the verdict is "structurally silent", relaunch with
+`--hindsight-mode refined` (which auto-promotes `--reasoning-mode refined`
+so the prompt teaches the new `<critique>` and `<refined_confidence>` tags).
+See `docs/SELF_LEARNING.md` §2.5 for the design rationale.
+
+```bash
+./venv/bin/python training/train_grpo.py \
+    --model-preset qwen1.5b --colab-profile a100 \
+    --hindsight --hindsight-mode refined \
+    --max-steps 250 \
+    --output-dir ./honest-qwen-1-5b-grpo-refined
+```
+
 ### 3e · Render committed training plots
 
 After training, regenerate the committed evidence PNGs from

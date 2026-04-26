@@ -43,6 +43,7 @@ from server.hindsight import (
     parse_hindsight,
     reward_hindsight,
 )
+from server.hindsight_v2 import make_refinement_reward
 from server.mutators import (
     DistractorMutator,
     NumericMutator,
@@ -890,14 +891,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--hindsight",
         action="store_true",
-        help="[Pillar 1] Enable trainer-time hindsight reward "
-             "(self-prediction head). Adds a third reward function.",
+        help="[Pillar 1] Enable trainer-time hindsight reward. Behaviour "
+             "depends on --hindsight-mode (default 'legacy' = original "
+             "self-prediction head; 'refined' = Calibration-Aware "
+             "Self-Refinement, see docs/SELF_LEARNING.md §2.5).",
+    )
+    p.add_argument(
+        "--hindsight-mode",
+        choices=("legacy", "refined"),
+        default="legacy",
+        help="Which hindsight head to attach when --hindsight is set. "
+             "'legacy' grades a <hindsight>r</hindsight> tag against y "
+             "(redundant with Brier in single-pass training; structurally "
+             "silent unless the prompt teaches the tag). 'refined' uses "
+             "the 5-tag Calibration-Aware Self-Refinement protocol — "
+             "auto-switches reasoning_mode to 'refined' so the prompt "
+             "describes the <critique> and <refined_confidence> tags.",
     )
     p.add_argument(
         "--hindsight-weight",
         type=float,
         default=DEFAULT_HINDSIGHT_WEIGHT,
-        help="Weight k for hindsight reward; -k(r-y)^2.",
+        help="Weight for hindsight reward. In 'legacy' mode, scales "
+             "-k(r-y)^2. In 'refined' mode, scales the (already-clipped) "
+             "CASR scalar — leave at default for sane magnitude.",
     )
     p.add_argument(
         "--replay-priority",
@@ -1010,6 +1027,19 @@ def main():
         parse_weight_csv(args.domain_weights, ["math", "code", "logic"])
         or preset.domain_weights
     )
+
+    # When --hindsight-mode refined is requested, the model MUST see a system
+    # prompt that teaches the <critique> and <refined_confidence> tags —
+    # otherwise the reward channel stays silent (the original hindsight bug).
+    # Auto-promote reasoning_mode unless the user explicitly forced "required".
+    if args.hindsight and args.hindsight_mode == "refined" and args.reasoning_mode != "refined":
+        log.info(
+            "--hindsight-mode refined requires reasoning_mode='refined' so the "
+            "prompt teaches the new tags. Auto-switching from '%s' to 'refined'.",
+            args.reasoning_mode,
+        )
+        args.reasoning_mode = "refined"
+
     system_prompt, user_template = prompt_templates(args.reasoning_mode)
 
     _apply_preset_defaults(args, preset)
@@ -1110,9 +1140,26 @@ def main():
         print(f"  reward_accuracy      (×{preset.reward_accuracy_weight}): "
               f"{weighted_accuracy(dry_completions, [], dry_gt, domain=dry_domains, problem_id=dry_pids)}")
         if args.hindsight:
-            hs = make_train_time_hindsight_reward(weight=args.hindsight_weight)
-            print(f"  reward_hindsight     (×{args.hindsight_weight}): "
-                  f"{hs(dry_completions, dry_prompts, dry_gt, domain=dry_domains, problem_id=dry_pids)}")
+            if args.hindsight_mode == "refined":
+                hs = make_refinement_reward(weight=args.hindsight_weight)
+                hs_label = "reward_refinement (CASR)"
+            else:
+                hs = make_train_time_hindsight_reward(weight=args.hindsight_weight)
+                hs_label = "reward_hindsight (legacy)"
+            # Add a refined-style example so the dry run exercises the new path.
+            dry_refined = (
+                "<reasoning>3+4=7</reasoning><answer>7</answer>"
+                "<confidence>0.6</confidence>"
+                "<critique>I rechecked: 3 + 4 = 7, no errors here.</critique>"
+                "<refined_confidence>0.9</refined_confidence>"
+            )
+            dry_completions_hs = list(dry_completions) + [dry_refined]
+            dry_prompts_hs = list(dry_prompts) + ["dummy_prompt"]
+            dry_gt_hs = list(dry_gt) + ["7"]
+            dry_domains_hs = list(dry_domains) + ["math"]
+            dry_pids_hs = list(dry_pids) + ["procedural_math_d1_dryrun"]
+            print(f"  {hs_label} (×{args.hindsight_weight}): "
+                  f"{hs(dry_completions_hs, dry_prompts_hs, dry_gt_hs, domain=dry_domains_hs, problem_id=dry_pids_hs)}")
         print(f"  controller snapshot (math):  {difficulty_controller.snapshot()['math']}")
         if smc is not None:
             print(f"  SMC snapshot:                {smc.snapshot()}")
@@ -1126,7 +1173,8 @@ def main():
         print(f"  curriculum mode:             "
               f"{'ADAPTIVE' if feedback_controller else 'STATIC (init_target=' + str(initial_target) + ')'}")
         print(f"  self-learning flags:         "
-              f"hindsight={args.hindsight} replay={args.replay_priority} "
+              f"hindsight={args.hindsight}(mode={args.hindsight_mode}) "
+              f"replay={args.replay_priority} "
               f"smc={args.self_mutate} self_play={args.self_play}")
         return
 
@@ -1186,7 +1234,21 @@ def main():
 
     reward_funcs: list = [brier_with_feedback, weighted_format, weighted_accuracy]
     if args.hindsight:
-        reward_funcs.append(make_train_time_hindsight_reward(weight=args.hindsight_weight))
+        if args.hindsight_mode == "refined":
+            reward_funcs.append(make_refinement_reward(weight=args.hindsight_weight))
+            log.info(
+                "Hindsight head: Calibration-Aware Self-Refinement (CASR), "
+                "weight=%g. See server.hindsight_v2 + docs/SELF_LEARNING.md §2.5.",
+                args.hindsight_weight,
+            )
+        else:
+            reward_funcs.append(make_train_time_hindsight_reward(weight=args.hindsight_weight))
+            log.info(
+                "Hindsight head: legacy self-prediction (-k(r-y)^2), weight=%g. "
+                "Note: this channel stays silent unless reasoning_mode teaches "
+                "the <hindsight> tag — verify post-run with bin/audit_hindsight.py.",
+                args.hindsight_weight,
+            )
 
     grpo_config = GRPOConfig(
         output_dir=args.output_dir,
@@ -1298,7 +1360,9 @@ def main():
     )
     selfl_flags = []
     if args.hindsight:
-        selfl_flags.append(f"hindsight(w={args.hindsight_weight})")
+        selfl_flags.append(
+            f"hindsight(mode={args.hindsight_mode},w={args.hindsight_weight})"
+        )
     if args.replay_priority:
         selfl_flags.append(
             f"replay(size={args.replay_buffer_size},mix={args.replay_mix},"
